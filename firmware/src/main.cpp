@@ -4,17 +4,17 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#include "config.h"
-#include "video_player.h"
 #include "audio_player.h"
+#include "config.h"
 #include "crt_effects.h"
+#include "video_player.h"
 
 static VideoPlayer s_video;
 static AudioPlayer s_audio;
 static VideoFile s_episodes[MAX_EPISODES];
 static int s_episodeCount = 0;
 static int s_currentEpisode = -1;
-static uint16_t* s_framebuffer = nullptr;
+static uint16_t *s_framebuffer = nullptr;
 static bool s_playing = false;
 static bool s_staticTransition = false;
 static uint32_t s_staticStart = 0;
@@ -39,7 +39,7 @@ static void showChannelOSD(int channel);
 static void showBootAnimation();
 static void handleTouch();
 
-static void audioTask(void* arg) {
+static void audioTask(void *arg) {
   while (true) {
     if (s_playing && s_audio.isPlaying()) {
       if (!M5.Speaker.isPlaying()) {
@@ -89,24 +89,28 @@ void setup() {
     M5.Display.setTextSize(2);
     M5.Display.setTextColor(TFT_RED, TFT_BLACK);
     M5.Display.drawString("NO SD CARD", 40, 100);
-    while (true) delay(1000);
+    while (true)
+      delay(1000);
   }
 
-  s_framebuffer = (uint16_t*)ps_malloc(DISPLAY_WIDTH * DISPLAY_HEIGHT * 2);
+  s_framebuffer = (uint16_t *)ps_malloc(DISPLAY_WIDTH * DISPLAY_HEIGHT * 2);
   if (!s_framebuffer) {
     M5.Display.drawString("PSRAM FAIL", 40, 120);
-    while (true) delay(1000);
+    while (true)
+      delay(1000);
   }
   log_i("Framebuffer: %p (PSRAM)", s_framebuffer);
 
   if (!s_video.begin()) {
     M5.Display.drawString("VIDEO INIT FAIL", 40, 140);
-    while (true) delay(1000);
+    while (true)
+      delay(1000);
   }
 
   if (!s_audio.begin()) {
     M5.Display.drawString("AUDIO INIT FAIL", 40, 160);
-    while (true) delay(1000);
+    while (true)
+      delay(1000);
   }
 
   s_episodeCount = VideoPlayer::scanEpisodes(s_episodes, MAX_EPISODES);
@@ -115,7 +119,8 @@ void setup() {
     M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
     M5.Display.drawString("NO .mjpeg FILES", 20, 100);
     M5.Display.drawString("ON SD CARD", 40, 130);
-    while (true) delay(1000);
+    while (true)
+      delay(1000);
   }
 
   log_i("Found %d episodes", s_episodeCount);
@@ -180,19 +185,24 @@ void loop() {
   }
 
   uint32_t audioUs = s_audio.getPlaybackTimeUs();
-  int targetFrame = audioUs * VIDEO_FPS / 1000000;
+  int targetFrame = (uint64_t)audioUs * VIDEO_FPS / 1000000;
 
   int lag = targetFrame - s_video.currentFrame();
-  if (lag < -1) { delay(1); return; }
+  if (lag < 0) {
+    delay(1);
+    return;
+  }
 
   if (lag > 0) {
     int toSkip = (lag > 5) ? 5 : lag;
     while (toSkip-- > 0) {
       bool got = xSemaphoreTake(s_sdMutex, pdMS_TO_TICKS(100)) == pdTRUE;
-      if (!got) continue;
+      if (!got)
+        continue;
       uint32_t fs = s_video.readNextFrame();
       xSemaphoreGive(s_sdMutex);
-      if (fs == 0) break;
+      if (fs == 0)
+        break;
     }
   }
 
@@ -202,11 +212,13 @@ void loop() {
     if (got) {
       uint32_t fs = s_video.readNextFrame();
       xSemaphoreGive(s_sdMutex);
-      if (fs > 0) decoded = s_video.decodeFrame(s_framebuffer);
+      if (fs > 0)
+        decoded = s_video.decodeFrame(s_framebuffer);
     }
   }
 
-  if (!decoded) return;
+  if (!decoded)
+    return;
 
   M5.Display.startWrite();
   M5.Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
@@ -221,14 +233,16 @@ void loop() {
 
 static void handleTouch() {
   uint32_t now = millis();
-  if (now - s_lastTouchMs < TOUCH_DEBOUNCE_MS) return;
+  if (now - s_lastTouchMs < TOUCH_DEBOUNCE_MS)
+    return;
 
   auto t = M5.Touch.getDetail();
   if (t.wasClicked()) {
     s_lastTouchMs = now;
     if (t.x < DISPLAY_WIDTH / 2) {
       showTVStatic(800);
-      s_channelNumber = (s_channelNumber <= 1) ? s_episodeCount : s_channelNumber - 1;
+      s_channelNumber =
+          (s_channelNumber <= 1) ? s_episodeCount : s_channelNumber - 1;
       playEpisode(s_playlist[s_channelNumber - 1]);
     } else {
       showTVStatic(800);
@@ -283,10 +297,11 @@ static void nextEpisode() {
 }
 
 static void playEpisode(int index) {
-  if (index < 0 || index >= s_episodeCount) return;
+  if (index < 0 || index >= s_episodeCount)
+    return;
 
-  const char* videoPath = s_episodes[index].path;
-  const char* audioPath = s_episodes[index].pcmPath;
+  const char *videoPath = s_episodes[index].path;
+  const char *audioPath = s_episodes[index].pcmPath;
 
   log_i("Playing episode %d: %s", index, videoPath);
 
@@ -333,8 +348,8 @@ static void showBootAnimation() {
     int cx = DISPLAY_WIDTH / 2;
     int cy = DISPLAY_HEIGHT / 2;
     int radius = (int)(t * 140);
-    int color = M5.Display.color565(
-      (int)(255 * t), (int)(200 * t), (int)(100 * t));
+    int color =
+        M5.Display.color565((int)(255 * t), (int)(200 * t), (int)(100 * t));
     M5.Display.fillCircle(cx, cy, radius, color);
     delay(30);
   }
@@ -342,7 +357,7 @@ static void showBootAnimation() {
   M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.drawString("SIMPSONS TV", 60, 60);
+  M5.Display.drawString("CoreM5S3 TV", 60, 60);
   M5.Display.setTextSize(1);
   M5.Display.drawString("Channel 3", 110, 100);
   M5.Display.drawString("Loading...", 110, 130);
