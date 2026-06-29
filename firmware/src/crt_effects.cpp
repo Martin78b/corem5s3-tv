@@ -60,5 +60,5 @@ uint16_t CRTEffects::dimColor(uint16_t color, uint8_t amount) {
 }
 
 uint16_t CRTEffects::randomColor() {
-  return M5.Display.color565(esp_random() & 0xFF, esp_random() & 0xFF, esp_random() & 0xFF);
+  return Display.color565(esp_random() & 0xFF, esp_random() & 0xFF, esp_random() & 0xFF);
 }

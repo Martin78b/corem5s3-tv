@@ -1,9 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
-#include <SD.h>
 #include <JPEGDEC.h>
-#include <M5Unified.h>
+#include "config.h"
 
 struct VideoFile {
   char path[64];

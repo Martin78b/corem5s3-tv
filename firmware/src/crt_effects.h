@@ -1,8 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
-#include <M5Unified.h>
 #include "config.h"
+#include "display_hal.h"
 
 class CRTEffects {
 public:

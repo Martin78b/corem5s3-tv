@@ -1,13 +1,18 @@
 #include <Arduino.h>
-#include <M5Unified.h>
-#include <SD.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include "config.h"
 
 #include "audio_player.h"
 #include "config.h"
 #include "crt_effects.h"
 #include "video_player.h"
+#include "display_hal.h"
+#include "audio_hal.h"
+
+#ifdef M5STACK
+  #define TOUCH_SUPPORT 1
+#endif
 
 static VideoPlayer s_video;
 static AudioPlayer s_audio;
@@ -27,6 +32,11 @@ static uint32_t s_lastTouchMs = 0;
 static uint32_t s_episodeStartMs = 0;
 static bool s_firstFrame = true;
 
+#ifndef M5STACK
+  TFT_eSPI Display;
+  I2SSpeaker Speaker;
+#endif
+
 static SemaphoreHandle_t s_sdMutex = NULL;
 
 static void initDisplay();
@@ -42,7 +52,7 @@ static void handleTouch();
 static void audioTask(void *arg) {
   while (true) {
     if (s_playing && s_audio.isPlaying()) {
-      if (!M5.Speaker.isPlaying()) {
+      if (!SPEAKER_OBJ.isPlaying()) {
         if (xSemaphoreTake(s_sdMutex, portMAX_DELAY) == pdTRUE) {
           s_audio.loop();
           xSemaphoreGive(s_sdMutex);
@@ -66,59 +76,91 @@ void setup() {
 
   s_sdMutex = xSemaphoreCreateMutex();
 
+#ifdef M5STACK
   auto cfg = M5.config();
   cfg.clear_display = true;
   M5.begin(cfg);
+  Display.setBrightness(200);
+#else
+  Display.begin();
+  #ifdef TFT_BL
+    #if TFT_BL >= 0
+      pinMode(TFT_BL, OUTPUT);
+      digitalWrite(TFT_BL, HIGH);
+    #endif
+  #endif
+#endif
 
-  M5.Display.setBrightness(200);
-  M5.Display.setRotation(1);
-  M5.Display.setSwapBytes(true);
-  M5.Display.fillScreen(TFT_BLACK);
+  Display.setRotation(0);
+  Display.setSwapBytes(true);
+  Display.fillScreen(TFT_BLACK);
 
-  M5.Speaker.setVolume(128);
-
-  auto spk_cfg = M5.Speaker.config();
+#ifdef M5STACK
+  SPEAKER_OBJ.setVolume(128);
+  auto spk_cfg = SPEAKER_OBJ.config();
   spk_cfg.sample_rate = AUDIO_SAMPLE_RATE;
   spk_cfg.dma_buf_count = 32;
   spk_cfg.dma_buf_len = 128;
-  M5.Speaker.config(spk_cfg);
+  SPEAKER_OBJ.config(spk_cfg);
+#else
+  #ifdef AUDIO_I2S_MCLK
+    Speaker.begin(AUDIO_I2S_BCLK, AUDIO_I2S_WS, AUDIO_I2S_DOUT, AUDIO_SAMPLE_RATE, AUDIO_I2S_MCLK);
+  #else
+    Speaker.begin(AUDIO_I2S_BCLK, AUDIO_I2S_WS, AUDIO_I2S_DOUT, AUDIO_SAMPLE_RATE);
+  #endif
+#endif
 
   showBootAnimation();
 
+#ifdef AUDIO_PA_CTRL
+  pinMode(AUDIO_PA_CTRL, OUTPUT);
+  digitalWrite(AUDIO_PA_CTRL, HIGH);
+  delay(10);
+#endif
+
+#ifdef WAVESHARE_154
+  pinMode(2, OUTPUT);
+  digitalWrite(2, HIGH);
+  delay(10);
+#endif
+
   if (!initSDCard()) {
-    M5.Display.setTextSize(2);
-    M5.Display.setTextColor(TFT_RED, TFT_BLACK);
-    M5.Display.drawString("NO SD CARD", 40, 100);
+    Display.setTextSize(2);
+    Display.setTextColor(TFT_RED, TFT_BLACK);
+    Display.drawString("NO SD CARD", 40, 100);
     while (true)
       delay(1000);
   }
 
   s_framebuffer = (uint16_t *)ps_malloc(DISPLAY_WIDTH * DISPLAY_HEIGHT * 2);
   if (!s_framebuffer) {
-    M5.Display.drawString("PSRAM FAIL", 40, 120);
+    s_framebuffer = (uint16_t *)malloc(DISPLAY_WIDTH * DISPLAY_HEIGHT * 2);
+  }
+  if (!s_framebuffer) {
+    Display.drawString("NO MEMORY", 40, 120);
     while (true)
       delay(1000);
   }
   log_i("Framebuffer: %p (PSRAM)", s_framebuffer);
 
   if (!s_video.begin()) {
-    M5.Display.drawString("VIDEO INIT FAIL", 40, 140);
+    Display.drawString("VIDEO INIT FAIL", 40, 140);
     while (true)
       delay(1000);
   }
 
   if (!s_audio.begin()) {
-    M5.Display.drawString("AUDIO INIT FAIL", 40, 160);
+    Display.drawString("AUDIO INIT FAIL", 40, 160);
     while (true)
       delay(1000);
   }
 
   s_episodeCount = VideoPlayer::scanEpisodes(s_episodes, MAX_EPISODES);
   if (s_episodeCount == 0) {
-    M5.Display.setTextSize(2);
-    M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
-    M5.Display.drawString("NO .mjpeg FILES", 20, 100);
-    M5.Display.drawString("ON SD CARD", 40, 130);
+    Display.setTextSize(2);
+    Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+    Display.drawString("NO .mjpeg FILES", 20, 100);
+    Display.drawString("ON SD CARD", 40, 130);
     while (true)
       delay(1000);
   }
@@ -136,9 +178,24 @@ void setup() {
 }
 
 void loop() {
-  M5.update();
+#ifdef WAVESHARE_154
+  static uint32_t bootPressStart = 0;
+  if (digitalRead(0) == LOW) {
+    if (bootPressStart == 0) bootPressStart = millis();
+    else if (millis() - bootPressStart > 3000) {
+      log_i("Power-off by long-press");
+      digitalWrite(2, LOW);
+      while (1) delay(1000);
+    }
+  } else {
+    bootPressStart = 0;
+  }
+#endif
 
+#ifdef M5STACK
+  M5.update();
   handleTouch();
+#endif
 
   static uint32_t audioFinishedAt = 0;
   static bool audioEndHandled = true;
@@ -217,13 +274,24 @@ void loop() {
     }
   }
 
-  if (!decoded)
+  if (!decoded) {
+    static uint32_t lastLog = 0;
+    if (millis() - lastLog > 3000) {
+      log_w("Frame decode failed (frame %d)", s_video.currentFrame());
+      lastLog = millis();
+    }
     return;
+  }
 
-  M5.Display.startWrite();
-  M5.Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-  M5.Display.writePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
-  M5.Display.endWrite();
+  Display.startWrite();
+  Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+  displayWritePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
+  Display.endWrite();
+
+  static uint32_t frameCount = 0;
+  if (++frameCount % 30 == 0) {
+    log_i("Displayed frame %d/%d (audioUs=%u)", s_video.currentFrame(), s_video.totalFrames(), audioUs);
+  }
 
   uint32_t nowMs = millis();
   if (nowMs < s_channelOsdEnd) {
@@ -231,6 +299,7 @@ void loop() {
   }
 }
 
+#ifdef M5STACK
 static void handleTouch() {
   uint32_t now = millis();
   if (now - s_lastTouchMs < TOUCH_DEBOUNCE_MS)
@@ -250,8 +319,27 @@ static void handleTouch() {
     }
   }
 }
+#endif
 
 static bool initSDCard() {
+#ifdef WAVESHARE_154
+  if (!SD_MMC.setPins(SD_CLK, SD_CMD, SD_D0, SD_D1, SD_D2, SD_D3)) {
+    log_e("SD_MMC setPins failed");
+    return false;
+  }
+  if (!SD_MMC.begin()) {
+    log_e("SD_MMC init failed");
+    return false;
+  }
+  uint8_t cardType = SD_MMC.cardType();
+  if (cardType != CARD_NONE && cardType != CARD_MMC) {
+    uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
+    log_i("SD_MMC card detected: %llu MB", cardSize);
+    return true;
+  }
+  log_e("No SD card found");
+  return false;
+#else
   SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
   pinMode(SD_CS, OUTPUT);
   digitalWrite(SD_CS, HIGH);
@@ -269,6 +357,7 @@ static bool initSDCard() {
   }
   log_e("SD card init failed");
   return false;
+#endif
 }
 
 static void buildPlaylist(bool shuffle) {
@@ -332,16 +421,16 @@ static void showTVStatic(uint32_t durationMs) {
 
   while (millis() - start < durationMs) {
     CRTEffects::generateStatic(s_framebuffer);
-    M5.Display.startWrite();
-    M5.Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    M5.Display.writePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
-    M5.Display.endWrite();
+    Display.startWrite();
+    Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    displayWritePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
+    Display.endWrite();
     delay(frameTime);
   }
 }
 
 static void showBootAnimation() {
-  M5.Display.fillScreen(TFT_BLACK);
+  Display.fillScreen(TFT_BLACK);
 
   for (int i = 0; i < 60; i++) {
     float t = (float)i / 60.0f;
@@ -349,18 +438,18 @@ static void showBootAnimation() {
     int cy = DISPLAY_HEIGHT / 2;
     int radius = (int)(t * 140);
     int color =
-        M5.Display.color565((int)(255 * t), (int)(200 * t), (int)(100 * t));
-    M5.Display.fillCircle(cx, cy, radius, color);
+        Display.color565((int)(255 * t), (int)(200 * t), (int)(100 * t));
+    Display.fillCircle(cx, cy, radius, color);
     delay(30);
   }
 
-  M5.Display.fillScreen(TFT_BLACK);
-  M5.Display.setTextSize(2);
-  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.drawString("CoreM5S3 TV", 60, 60);
-  M5.Display.setTextSize(1);
-  M5.Display.drawString("Channel 3", 110, 100);
-  M5.Display.drawString("Loading...", 110, 130);
+  Display.fillScreen(TFT_BLACK);
+  Display.setTextSize(2);
+  Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  Display.drawString("CoreM5S3 TV", 60, 60);
+  Display.setTextSize(1);
+  Display.drawString("Channel 3", 110, 100);
+  Display.drawString("Loading...", 110, 130);
   delay(1500);
 }
 
@@ -368,9 +457,10 @@ static void showChannelOSD(int channel) {
   char buf[16];
   snprintf(buf, sizeof(buf), "CH %02d", channel);
 
-  M5.Display.fillRect(240, 4, 76, 22, TFT_BLACK);
-  M5.Display.drawRect(240, 4, 76, 22, TFT_WHITE);
-  M5.Display.setTextSize(1);
-  M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-  M5.Display.drawString(buf, 246, 8);
+  int osdX = DISPLAY_WIDTH - 80;
+  Display.fillRect(osdX, 4, 76, 22, TFT_BLACK);
+  Display.drawRect(osdX, 4, 76, 22, TFT_WHITE);
+  Display.setTextSize(1);
+  Display.setTextColor(TFT_GREEN, TFT_BLACK);
+  Display.drawString(buf, osdX + 6, 8);
 }

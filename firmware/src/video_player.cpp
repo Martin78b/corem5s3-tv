@@ -1,5 +1,4 @@
 #include "video_player.h"
-#include "config.h"
 
 uint16_t* VideoPlayer::_drawTarget = nullptr;
 
@@ -20,7 +19,7 @@ bool VideoPlayer::begin() {
 
 bool VideoPlayer::openFile(const char* path) {
   close();
-  _file = SD.open(path, FILE_READ);
+  _file = SD_FS.open(path, FILE_READ);
   if (!_file) {
     log_e("Failed to open: %s", path);
     return false;
@@ -98,7 +97,7 @@ int VideoPlayer::JPEGDraw(JPEGDRAW* draw) {
 
 int VideoPlayer::scanEpisodes(VideoFile* episodes, int maxEpisodes) {
   int count = 0;
-  File root = SD.open("/");
+  File root = SD_FS.open("/");
   if (!root) return 0;
 
   while (count < maxEpisodes) {
@@ -127,5 +126,5 @@ bool VideoPlayer::hasAudio(const char* videoPath) {
   strncpy(pcmPath, videoPath, 64);
   char* dot = strrchr(pcmPath, '.');
   if (dot) strcpy(dot, PCM_EXT);
-  return SD.exists(pcmPath);
+  return SD_FS.exists(pcmPath);
 }

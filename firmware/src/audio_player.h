@@ -1,9 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
-#include <SD.h>
-#include <M5Unified.h>
 #include "config.h"
+#include "audio_hal.h"
 
 class AudioPlayer {
 public:
