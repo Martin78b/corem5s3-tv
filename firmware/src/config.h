@@ -58,6 +58,22 @@
   #define SD_FS SD
 #endif
 
+// ── Buttons (Waveshare) ──
+#ifdef WAVESHARE_154
+  #define BTN_BOOT 0
+  #define BTN_PWR  5
+  #define BTN_PLUS 4
+#endif
+
+// ── Touch (CST816T) ──
+#ifdef WAVESHARE_154
+  #define TOUCH_SDA  42
+  #define TOUCH_SCL  41
+  #define TOUCH_INT  48
+  #define TOUCH_RST  47
+  #define TOUCH_ADDR 0x15
+#endif
+
 // ── CRT Effects ──
 #define CRT_SCANLINE_ALPHA 48
 #define CRT_NOISE_PIXELS 16
