@@ -27,8 +27,8 @@ public:
       .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
       .communication_format = I2S_COMM_FORMAT_STAND_I2S,
       .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-      .dma_buf_count = 8,
-      .dma_buf_len = 128,
+      .dma_buf_count = 16,
+      .dma_buf_len = 256,
     };
 
     i2s_pin_config_t pin_config = {
@@ -50,6 +50,9 @@ public:
     }
 
     _started = true;
+
+    // Start I2S clocks (BCLK, WS, MCLK)
+    i2s_start(I2S_NUM_0);
     return true;
   }
 
@@ -66,6 +69,11 @@ public:
     _writeUs = micros();
     _writeBytes = samples * 2;
     i2s_write(I2S_NUM_0, data, samples * 2, &written, portMAX_DELAY);
+  }
+
+  void startClocks() {
+    if (!_started) return;
+    i2s_start(I2S_NUM_0);
   }
 
   void stop(int) {

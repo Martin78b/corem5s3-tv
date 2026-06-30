@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_sleep.h>
+#include <esp_log.h>
+#include <driver/gpio.h>
 #include "config.h"
 
 #include "audio_player.h"
@@ -56,9 +59,10 @@ static void handleTouch();
 static void audioTask(void *arg) {
   while (true) {
     if (s_playing && s_audio.isPlaying()) {
-      if (!SPEAKER_OBJ.isPlaying()) {
+      if (s_audio.needsFill()) {
+        s_audio.playFilled();
         if (xSemaphoreTake(s_sdMutex, portMAX_DELAY) == pdTRUE) {
-          s_audio.loop();
+          s_audio.fillNext();
           xSemaphoreGive(s_sdMutex);
         }
       }
@@ -71,7 +75,17 @@ static void audioTask(void *arg) {
 
 void setup() {
   Serial.begin(115200);
-  delay(100);
+  delay(500);
+
+  // Hold power immediately so board doesn't turn off
+#ifdef WAVESHARE_154
+  pinMode(BTN_PWR, OUTPUT);
+  digitalWrite(BTN_PWR, HIGH);
+#endif
+
+  Serial.println("\n\n=== BOOT ===");
+  Serial.flush();
+  log_i("Boot start");
 
   log_i("PSRAM found: %s", psramFound() ? "YES" : "NO");
   if (psramFound()) {
@@ -116,6 +130,15 @@ void setup() {
 
   showBootAnimation();
 
+#ifdef TOUCH_RST
+  // Reset touch (and ES8311 if shared) before initializing audio codec
+  pinMode(TOUCH_RST, OUTPUT);
+  digitalWrite(TOUCH_RST, LOW);
+  delay(10);
+  digitalWrite(TOUCH_RST, HIGH);
+  delay(50);
+#endif
+
 #ifdef AUDIO_PA_CTRL
   pinMode(AUDIO_PA_CTRL, OUTPUT);
   digitalWrite(AUDIO_PA_CTRL, HIGH);
@@ -126,21 +149,50 @@ void setup() {
   pinMode(2, OUTPUT);
   digitalWrite(2, HIGH);
   delay(10);
-  // Initialize ES8311 audio codec via I2C (SDA=42, SCL=41, addr=0x18)
+  Display.setTextSize(1);
+  Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  Display.drawString("Init I2C touch...", 10, 170);
+  // Install I2C_NUM_1 for touch controller (shared bus with ES8311: SDA=42, SCL=41)
+  {
+    i2c_config_t i2c_cfg = {};
+    i2c_cfg.mode = I2C_MODE_MASTER;
+    i2c_cfg.sda_io_num = (gpio_num_t)42;
+    i2c_cfg.scl_io_num = (gpio_num_t)41;
+    i2c_cfg.sda_pullup_en = GPIO_PULLUP_ENABLE;
+    i2c_cfg.scl_pullup_en = GPIO_PULLUP_ENABLE;
+    i2c_cfg.master.clk_speed = 100000;
+    esp_err_t err = i2c_param_config(I2C_NUM_1, &i2c_cfg);
+    if (err != ESP_OK) {
+      log_e("I2C param_config failed: %d", err);
+      Display.drawString("I2C cfg fail", 110, 170);
+    }
+    err = i2c_driver_install(I2C_NUM_1, I2C_MODE_MASTER, 0, 0, 0);
+    if (err != ESP_OK) {
+      log_e("I2C driver_install failed: %d", err);
+      Display.drawString("I2C drv fail", 110, 170);
+    } else {
+      Display.drawString("OK", 110, 170);
+    }
+  }
+  // Keep I2S clocks running (MCLK needed for ES8311 I2C communication)
+  Speaker.startClocks();
+  delay(50);
+
+  Display.setTextSize(1);
+  Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  Display.drawString("Init audio...", 10, 180);
   if (!es8311_init(42, 41, 0x18, AUDIO_SAMPLE_RATE)) {
     log_w("ES8311 init failed - audio may be silent");
+    Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+    Display.drawString("Audio init fail", 20, 180);
   } else {
     es8311_set_volume(128);
+    log_i("ES8311 initialized OK");
+    Display.setTextColor(TFT_GREEN, TFT_BLACK);
+    Display.drawString("Audio OK", 20, 180);
   }
-  // Initialize CST816T touch (reset pulse, shares I2C bus I2C_NUM_1 with ES8311)
-  pinMode(TOUCH_RST, OUTPUT);
-  digitalWrite(TOUCH_RST, LOW);
-  delay(10);
-  digitalWrite(TOUCH_RST, HIGH);
-  delay(50);
   // Configure button pins
   pinMode(BTN_BOOT, INPUT_PULLUP);
-  pinMode(BTN_PWR, INPUT_PULLUP);
   pinMode(BTN_PLUS, INPUT_PULLUP);
 #endif
 
@@ -186,12 +238,15 @@ void setup() {
   }
 
   log_i("Found %d episodes", s_episodeCount);
+  Display.drawString("Found episodes", 10, 210);
 
   xTaskCreatePinnedToCore(audioTask, "audio", 16384, NULL, 5, NULL, 0);
 
   buildPlaylist(true);
+  Display.drawString("Playlist OK", 10, 220);
 
   delay(1000);
+  Display.drawString("Starting...", 10, 230);
   showTVStatic(STATIC_TRANSITION_MS);
   s_channelNumber = 1;
   playEpisode(s_playlist[0]);
@@ -199,44 +254,43 @@ void setup() {
 
 void loop() {
 #ifdef WAVESHARE_154
-  handleTouch();
   {
-    // BOOT button (GPIO0): short press = next, long 3s = power off
-    static uint32_t bootPressStart = 0;
+    // PWR button (GPIO5): short press = next, long 3s = power off
+    static uint32_t pwrPressStart = 0;
     static bool longPressHandled = false;
-    bool btnPressed = (digitalRead(BTN_BOOT) == LOW);
+    bool btnPressed = (gpio_get_level((gpio_num_t)BTN_PWR) == 0);
     if (btnPressed) {
-      if (bootPressStart == 0) {
-        bootPressStart = millis();
+      if (pwrPressStart == 0) {
+        pwrPressStart = millis();
         longPressHandled = false;
-      } else if (!longPressHandled && millis() - bootPressStart > 3000) {
+      } else if (!longPressHandled && millis() - pwrPressStart > 3000) {
         longPressHandled = true;
         showTVStatic(STATIC_TRANSITION_MS);
-        log_i("Power-off by long-press");
         digitalWrite(2, LOW);
-        while (1) delay(1000);
+        delay(100);
+        esp_deep_sleep_start();
       }
     } else {
-      if (bootPressStart > 0 && !longPressHandled) {
-        uint32_t held = millis() - bootPressStart;
+      if (pwrPressStart > 0 && !longPressHandled) {
+        uint32_t held = millis() - pwrPressStart;
         if (held > 100 && held < 3000) {
           showTVStatic(800);
           nextEpisode();
         }
       }
-      bootPressStart = 0;
+      pwrPressStart = 0;
       longPressHandled = false;
     }
-    // PWR button (GPIO5): short press = next channel
-    if (digitalRead(BTN_PWR) == LOW) {
-      static uint32_t pwrPressMs = 0;
-      if (pwrPressMs == 0) {
-        pwrPressMs = millis();
-      } else if (millis() - pwrPressMs > 50) {
+    // BOOT button (GPIO0): short press = next channel
+    if (digitalRead(BTN_BOOT) == LOW) {
+      static uint32_t bootPressMs = 0;
+      if (bootPressMs == 0) {
+        bootPressMs = millis();
+      } else if (millis() - bootPressMs > 50) {
         showTVStatic(800);
         nextEpisode();
-        while (digitalRead(BTN_PWR) == LOW) delay(10);
-        pwrPressMs = 0;
+        while (digitalRead(BTN_BOOT) == LOW) delay(10);
+        bootPressMs = 0;
       }
     }
     // PLUS button (GPIO4): short press = prev channel
@@ -304,57 +358,38 @@ void loop() {
     return;
   }
 
-  uint32_t audioUs = s_audio.getPlaybackTimeUs();
-  int targetFrame = (uint64_t)audioUs * VIDEO_FPS / 1000000;
-
-  int lag = targetFrame - s_video.currentFrame();
-  if (lag < 0) {
+  // Frame pacing - skip early frames
+  static uint32_t lastFrameUs = 0;
+  uint32_t nowUs = micros();
+  uint32_t frameInterval = 1000000 / VIDEO_FPS;
+  if (nowUs - lastFrameUs < frameInterval) {
     delay(1);
     return;
   }
+  lastFrameUs = nowUs;
 
-  if (lag > 0) {
-    int toSkip = (lag > 5) ? 5 : lag;
-    while (toSkip-- > 0) {
-      bool got = xSemaphoreTake(s_sdMutex, pdMS_TO_TICKS(100)) == pdTRUE;
-      if (!got)
-        continue;
-      uint32_t fs = s_video.readNextFrame();
-      xSemaphoreGive(s_sdMutex);
-      if (fs == 0)
-        break;
-    }
-  }
-
+  // Read and decode frame
   bool decoded = false;
   {
-    bool got = xSemaphoreTake(s_sdMutex, pdMS_TO_TICKS(100)) == pdTRUE;
+    bool got = xSemaphoreTake(s_sdMutex, pdMS_TO_TICKS(50)) == pdTRUE;
     if (got) {
       uint32_t fs = s_video.readNextFrame();
       xSemaphoreGive(s_sdMutex);
-      if (fs > 0)
+      if (fs > 0) {
         decoded = s_video.decodeFrame(s_framebuffer);
+      }
     }
   }
 
   if (!decoded) {
-    static uint32_t lastLog = 0;
-    if (millis() - lastLog > 3000) {
-      log_w("Frame decode failed (frame %d)", s_video.currentFrame());
-      lastLog = millis();
-    }
     return;
   }
 
+  // Write decoded frame to display
   Display.startWrite();
   Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
   displayWritePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
   Display.endWrite();
-
-  static uint32_t frameCount = 0;
-  if (++frameCount % 30 == 0) {
-    log_i("Displayed frame %d/%d (audioUs=%u)", s_video.currentFrame(), s_video.totalFrames(), audioUs);
-  }
 
   uint32_t nowMs = millis();
   if (nowMs < s_channelOsdEnd) {
@@ -508,6 +543,10 @@ static void playEpisode(int index) {
   const char *audioPath = s_episodes[index].pcmPath;
 
   log_i("Playing episode %d: %s", index, videoPath);
+  Display.fillScreen(TFT_BLACK);
+  Display.setTextSize(2);
+  Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  Display.drawString("Open video...", 10, 80);
 
   s_episodeStartMs = millis();
 
@@ -515,11 +554,17 @@ static void playEpisode(int index) {
     if (!s_video.openFile(videoPath)) {
       xSemaphoreGive(s_sdMutex);
       log_e("Failed to open video");
+      Display.drawString("VIDEO FAIL", 10, 100);
       return;
     }
+    Display.drawString("Video OK", 10, 100);
 
     if (VideoPlayer::hasAudio(videoPath)) {
+      Display.drawString("Has audio", 10, 120);
       s_audio.playFile(audioPath);
+      Display.drawString("Audio OK", 10, 140);
+    } else {
+      Display.drawString("No audio", 10, 120);
     }
     xSemaphoreGive(s_sdMutex);
   }

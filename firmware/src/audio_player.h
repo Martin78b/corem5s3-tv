@@ -10,7 +10,9 @@ public:
   bool begin();
   bool playFile(const char* path);
   void stop();
-  void loop();
+  bool needsFill();
+  void playFilled();
+  void fillNext();
   bool isPlaying();
   void setVolume(uint8_t vol);
   uint32_t getPlaybackTimeUs();
@@ -27,4 +29,5 @@ private:
   int _playIdx;
   uint8_t _volume;
   uint64_t _totalSamples;
+  uint64_t _startUs;
 };

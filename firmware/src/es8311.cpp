@@ -43,11 +43,11 @@ static const char* TAG = "ES8311";
 #define ES8311_GP_REG45          0x45
 #define ES8311_CHIP_ID           0xFD
 
-#define I2C_MASTER_NUM I2C_NUM_1
-#define I2C_MASTER_FREQ_HZ 400000
+#define I2C_MASTER_FREQ_HZ 100000
 #define I2C_TIMEOUT_MS 100
 
 static uint8_t _addr = 0x18;
+static i2c_port_t _bus = I2C_NUM_1;
 static bool _initialized = false;
 
 static esp_err_t write_reg(uint8_t reg, uint8_t val) {
@@ -57,7 +57,7 @@ static esp_err_t write_reg(uint8_t reg, uint8_t val) {
   i2c_master_write_byte(cmd, reg, true);
   i2c_master_write_byte(cmd, val, true);
   i2c_master_stop(cmd);
-  esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+  esp_err_t ret = i2c_master_cmd_begin(_bus, cmd, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
   i2c_cmd_link_delete(cmd);
   return ret;
 }
@@ -68,7 +68,7 @@ static esp_err_t read_reg(uint8_t reg, uint8_t *val) {
   i2c_master_write_byte(cmd, (_addr << 1) | I2C_MASTER_WRITE, true);
   i2c_master_write_byte(cmd, reg, true);
   i2c_master_stop(cmd);
-  esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+  esp_err_t ret = i2c_master_cmd_begin(_bus, cmd, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
   i2c_cmd_link_delete(cmd);
   if (ret != ESP_OK) return ret;
 
@@ -77,7 +77,7 @@ static esp_err_t read_reg(uint8_t reg, uint8_t *val) {
   i2c_master_write_byte(cmd, (_addr << 1) | I2C_MASTER_READ, true);
   i2c_master_read_byte(cmd, val, I2C_MASTER_NACK);
   i2c_master_stop(cmd);
-  ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+  ret = i2c_master_cmd_begin(_bus, cmd, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
   i2c_cmd_link_delete(cmd);
   return ret;
 }
@@ -86,26 +86,76 @@ bool es8311_init(int sda, int scl, uint8_t addr, int sample_rate) {
   if (_initialized) return true;
   _addr = addr;
 
-  i2c_config_t conf = {};
-  conf.mode = I2C_MODE_MASTER;
-  conf.sda_io_num = (gpio_num_t)sda;
-  conf.scl_io_num = (gpio_num_t)scl;
-  conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
-  conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-  conf.master.clk_speed = I2C_MASTER_FREQ_HZ;
-  esp_err_t err = i2c_param_config(I2C_MASTER_NUM, &conf);
-  if (err != ESP_OK) { ESP_LOGE(TAG, "i2c_param_config failed: %d", err); return false; }
-  err = i2c_driver_install(I2C_MASTER_NUM, I2C_MODE_MASTER, 0, 0, 0);
-  if (err != ESP_OK) { ESP_LOGE(TAG, "i2c_driver_install failed: %d", err); return false; }
+  // Try both I2C buses (I2C_NUM_0 and I2C_NUM_1)
+  i2c_port_t buses[] = {I2C_NUM_0, I2C_NUM_1};
+  bool found = false;
 
-  uint8_t id = 0;
-  err = read_reg(ES8311_CHIP_ID, &id);
-  if (err != ESP_OK || id != 0xA0) {
-    ESP_LOGE(TAG, "ES8311 not found at 0x%02X (err=%d, id=0x%02X)", addr, err, id);
-    i2c_driver_delete(I2C_MASTER_NUM);
+  for (int b = 0; b < 2 && !found; b++) {
+    i2c_port_t bus = buses[b];
+    i2c_config_t conf = {};
+    conf.mode = I2C_MODE_MASTER;
+    conf.sda_io_num = (gpio_num_t)sda;
+    conf.scl_io_num = (gpio_num_t)scl;
+    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.master.clk_speed = I2C_MASTER_FREQ_HZ;
+    esp_err_t err = i2c_param_config(bus, &conf);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "i2c_param_config bus %d failed: %d", bus, err); continue; }
+    err = i2c_driver_install(bus, I2C_MODE_MASTER, 0, 0, 0);
+    if (err == ESP_OK) {
+      ESP_LOGI(TAG, "I2C_NUM_%d driver installed", bus);
+    } else {
+      ESP_LOGW(TAG, "I2C_NUM_%d driver install: %d (might be already initialized — continuing)", bus, err);
+    }
+
+    // Try multiple addresses
+    uint8_t addrs[] = {addr, (uint8_t)(addr ^ 0x08), 0x10, 0x11, 0x18, 0x19, 0x1A, 0x1B};
+    for (int i = 0; i < 8 && !found; i++) {
+      _addr = addrs[i];
+      // Quick probe: write 0 bytes to check if device acks
+      i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+      i2c_master_start(cmd);
+      i2c_master_write_byte(cmd, (_addr << 1) | I2C_MASTER_WRITE, true);
+      i2c_master_stop(cmd);
+      err = i2c_master_cmd_begin(bus, cmd, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+      i2c_cmd_link_delete(cmd);
+      if (err == ESP_OK) {
+        uint8_t id = 0;
+        // Read chip ID register (0xFD) using bus directly
+        i2c_cmd_handle_t cmd2 = i2c_cmd_link_create();
+        i2c_master_start(cmd2);
+        i2c_master_write_byte(cmd2, (_addr << 1) | I2C_MASTER_WRITE, true);
+        i2c_master_write_byte(cmd2, ES8311_CHIP_ID, true);
+        i2c_master_stop(cmd2);
+        i2c_master_cmd_begin(bus, cmd2, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+        i2c_cmd_link_delete(cmd2);
+        cmd2 = i2c_cmd_link_create();
+        i2c_master_start(cmd2);
+        i2c_master_write_byte(cmd2, (_addr << 1) | I2C_MASTER_READ, true);
+        i2c_master_read_byte(cmd2, &id, I2C_MASTER_NACK);
+        i2c_master_stop(cmd2);
+        err = i2c_master_cmd_begin(bus, cmd2, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+        i2c_cmd_link_delete(cmd2);
+        if (err == ESP_OK && id != 0xFF) {
+          ESP_LOGI(TAG, "Chip ID at 0x%02X = 0x%02X", _addr, id);
+        } else {
+          ESP_LOGW(TAG, "Chip ID read at 0x%02X: err=%d id=0x%02X — proceeding anyway", _addr, err, id);
+        }
+        found = true;
+        _bus = bus;
+        ESP_LOGI(TAG, "Device found at 0x%02X on I2C_NUM_%d", _addr, _bus);
+        break;
+      }
+    }
+    if (!found) {
+      ESP_LOGI(TAG, "ES8311 not found on I2C_NUM_%d", bus);
+    }
+  }
+
+  if (!found) {
+    ESP_LOGE(TAG, "ES8311 not found on any I2C bus or address");
     return false;
   }
-  ESP_LOGI(TAG, "ES8311 found at 0x%02X, ID=0x%02X", addr, id);
 
   write_reg(ES8311_SYSTEM_REG0D, 0xFA);
   vTaskDelay(pdMS_TO_TICKS(5));
@@ -145,8 +195,8 @@ bool es8311_init(int sda, int scl, uint8_t addr, int sample_rate) {
   write_reg(ES8311_CLK_MANAGER_REG08, 0xFF);
   write_reg(ES8311_CLK_MANAGER_REG06, 0x03);
 
-  write_reg(ES8311_SDPIN_REG09, 0x0C);
-  write_reg(ES8311_SDPOUT_REG0A, 0x0C);
+  write_reg(ES8311_SDPIN_REG09, 0x04);   // I2S standard, 16-bit
+  write_reg(ES8311_SDPOUT_REG0A, 0x04);  // I2S standard, 16-bit
 
   write_reg(ES8311_ADC_REG17, 0xBF);
   write_reg(ES8311_SYSTEM_REG0E, 0x02);
@@ -154,10 +204,10 @@ bool es8311_init(int sda, int scl, uint8_t addr, int sample_rate) {
   write_reg(ES8311_SYSTEM_REG14, 0x1A);
   write_reg(ES8311_SYSTEM_REG0D, 0x01);
   write_reg(ES8311_ADC_REG15, 0x40);
-  write_reg(ES8311_DAC_REG37, 0x08);
+  write_reg(ES8311_DAC_REG37, 0x10);
   write_reg(ES8311_GP_REG45, 0x00);
 
-  write_reg(ES8311_DAC_REG32, 0x30);
+  write_reg(ES8311_DAC_REG32, 0xFF);
   read_reg(ES8311_DAC_REG31, &regv);
   regv &= 0x9F;
   write_reg(ES8311_DAC_REG31, regv);

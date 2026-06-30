@@ -2,7 +2,7 @@
 
 AudioPlayer::AudioPlayer()
   : _playing(false), _playPtr(nullptr), _playSamples(0),
-    _fillPtr(nullptr), _fillSamples(0), _playIdx(0), _volume(128), _totalSamples(0) {}
+    _fillPtr(nullptr), _fillSamples(0), _playIdx(0), _volume(128), _totalSamples(0), _startUs(0) {}
 
 bool AudioPlayer::begin() {
   return true;
@@ -40,6 +40,7 @@ bool AudioPlayer::playFile(const char* path) {
   }
 
   _playing = true;
+  _startUs = micros();
   log_i("Playing audio: %s", path);
   return true;
 }
@@ -50,22 +51,26 @@ void AudioPlayer::stop() {
   if (_file) _file.close();
 }
 
-void AudioPlayer::loop() {
-  if (!_playing) return;
+bool AudioPlayer::needsFill() {
+  if (!_playing) return false;
+  if (SPEAKER_OBJ.isPlaying(0)) return false;
+  return true;
+}
 
-  if (SPEAKER_OBJ.isPlaying(0)) return;
-
+void AudioPlayer::playFilled() {
   if (!_fillPtr) {
     _playing = false;
+    SPEAKER_OBJ.stop(0);
     _file.close();
     return;
   }
-
   _playPtr = _fillPtr;
   _playSamples = _fillSamples;
   _totalSamples += _playSamples;
   SPEAKER_OBJ.playRaw((const int16_t*)_playPtr, _playSamples, AUDIO_SAMPLE_RATE, false, 1, _volume, true);
+}
 
+void AudioPlayer::fillNext() {
   int16_t* nextBuf = (_playIdx == 0) ? _buf0 : _buf1;
   size_t br = _file.read((uint8_t*)nextBuf, AUDIO_READ_SIZE);
   if (br > 0) {
@@ -75,6 +80,7 @@ void AudioPlayer::loop() {
   } else {
     _fillPtr = nullptr;
     _fillSamples = 0;
+    _file.close();
   }
 }
 
@@ -91,5 +97,7 @@ void AudioPlayer::setVolume(uint8_t vol) {
 }
 
 uint32_t AudioPlayer::getPlaybackTimeUs() {
-  return _totalSamples * 1000000ULL / AUDIO_SAMPLE_RATE;
+  if (_startUs == 0) return 0;
+  uint64_t elapsed = micros() - _startUs;
+  return (uint32_t)elapsed;
 }
