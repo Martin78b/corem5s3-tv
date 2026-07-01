@@ -2,15 +2,15 @@
 
 // ── Display ──
 #if defined(GENERIC_154) || defined(WAVESHARE_154)
-  #ifndef DISPLAY_WIDTH
-    #define DISPLAY_WIDTH 240
-  #endif
-  #ifndef DISPLAY_HEIGHT
-    #define DISPLAY_HEIGHT 240
-  #endif
+#ifndef DISPLAY_WIDTH
+#define DISPLAY_WIDTH 240
+#endif
+#ifndef DISPLAY_HEIGHT
+#define DISPLAY_HEIGHT 240
+#endif
 #else
-  #define DISPLAY_WIDTH 320
-  #define DISPLAY_HEIGHT 240
+#define DISPLAY_WIDTH 320
+#define DISPLAY_HEIGHT 240
 #endif
 
 // ── Video ──
@@ -24,15 +24,15 @@
 #define AUDIO_BITS 16
 #define AUDIO_CHANNELS 1
 #ifdef WAVESHARE_154
-  #define AUDIO_I2S_BCLK 9
-  #define AUDIO_I2S_WS 10
-  #define AUDIO_I2S_DOUT 12
-  #define AUDIO_I2S_MCLK 8
-  #define AUDIO_PA_CTRL 7
+#define AUDIO_I2S_BCLK 9
+#define AUDIO_I2S_WS 10
+#define AUDIO_I2S_DOUT 12
+#define AUDIO_I2S_MCLK 8
+#define AUDIO_PA_CTRL 7
 #else
-  #define AUDIO_I2S_BCLK 9
-  #define AUDIO_I2S_WS 0
-  #define AUDIO_I2S_DOUT 13
+#define AUDIO_I2S_BCLK 9
+#define AUDIO_I2S_WS 0
+#define AUDIO_I2S_DOUT 13
 #endif
 #define AUDIO_DMA_BUF_COUNT 8
 #define AUDIO_DMA_BUF_LEN 512
@@ -40,38 +40,38 @@
 
 // ── SD Card ──
 #ifdef WAVESHARE_154
-  #include <SD_MMC.h>
-  #define SD_CLK  16
-  #define SD_CMD  15
-  #define SD_D0   17
-  #define SD_D1   18
-  #define SD_D2   13
-  #define SD_D3   14
-  #define SD_FS SD_MMC
+#include <SD_MMC.h>
+#define SD_CLK 16
+#define SD_CMD 15
+#define SD_D0 17
+#define SD_D1 18
+#define SD_D2 13
+#define SD_D3 14
+#define SD_FS SD_MMC
 #else
-  #include <SD.h>
-  #define SD_CS 4
-  #define SD_MOSI 37
-  #define SD_MISO 35
-  #define SD_SCLK 36
-  #define SD_SPI_FREQ 40000000
-  #define SD_FS SD
+#include <SD.h>
+#define SD_CS 4
+#define SD_MOSI 37
+#define SD_MISO 35
+#define SD_SCLK 36
+#define SD_SPI_FREQ 40000000
+#define SD_FS SD
 #endif
 
 // ── Buttons (Waveshare) ──
 #ifdef WAVESHARE_154
-  #define BTN_BOOT 0
-  #define BTN_PWR  5
-  #define BTN_PLUS 4
+#define BTN_BOOT 0
+#define BTN_PWR 5
+#define BTN_PLUS 4
 #endif
 
 // ── Touch (CST816T) ──
 #ifdef WAVESHARE_154
-  #define TOUCH_SDA  42
-  #define TOUCH_SCL  41
-  #define TOUCH_INT  48
-  #define TOUCH_RST  47
-  #define TOUCH_ADDR 0x15
+#define TOUCH_SDA 42
+#define TOUCH_SCL 41
+#define TOUCH_INT 48
+#define TOUCH_RST 47
+#define TOUCH_ADDR 0x15
 #endif
 
 // ── CRT Effects ──
@@ -86,7 +86,7 @@
 
 // ── TV UI ──
 #define CHANNEL_OSD_MS 2000
-#define STATIC_TRANSITION_MS 1500
+#define STATIC_TRANSITION_MS 1000
 
 // ── Touch Zones ──
 #define TOUCH_TAP_MS 300
