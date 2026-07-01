@@ -208,7 +208,7 @@ bool es8311_init(int sda, int scl, uint8_t addr, int sample_rate) {
   write_reg(ES8311_DAC_REG37, 0x08);
   write_reg(ES8311_GP_REG45, 0x00);
 
-  write_reg(ES8311_DAC_REG32, 0xFF);
+  write_reg(ES8311_DAC_REG32, 0xBF);  // 0dB (no digital gain/attenuation)
   read_reg(ES8311_DAC_REG31, &regv);
   regv &= 0x9F;
   write_reg(ES8311_DAC_REG31, regv);
@@ -219,7 +219,9 @@ bool es8311_init(int sda, int scl, uint8_t addr, int sample_rate) {
 }
 
 bool es8311_set_volume(uint8_t vol) {
-  uint8_t reg = (uint8_t)((uint32_t)vol * 0xFF / 128);
+  // Map 0-255 to register range 0x00 (-95.5dB) to 0xBF (0dB)
+  // Avoids the +32dB digital gain range (0xC0-0xFF) which causes clipping
+  uint8_t reg = (uint8_t)((uint32_t)vol * 0xBF / 255);
   return write_reg(ES8311_DAC_REG32, reg) == ESP_OK;
 }
 

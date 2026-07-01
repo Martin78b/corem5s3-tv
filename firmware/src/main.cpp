@@ -186,7 +186,7 @@ void setup() {
     Display.setTextColor(TFT_YELLOW, TFT_BLACK);
     Display.drawString("Audio init fail", 20, 180);
   } else {
-    es8311_set_volume(128);
+    es8311_set_volume(255);  // 0dB (full volume, no digital gain)
     log_i("ES8311 initialized OK");
     Display.setTextColor(TFT_GREEN, TFT_BLACK);
     Display.drawString("Audio OK", 20, 180);

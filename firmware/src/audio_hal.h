@@ -24,11 +24,11 @@ public:
       .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
       .sample_rate = (uint32_t)sampleRate,
       .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-      .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+      .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
       .communication_format = I2S_COMM_FORMAT_STAND_I2S,
       .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-      .dma_buf_count = 16,
-      .dma_buf_len = 256,
+      .dma_buf_count = AUDIO_DMA_BUF_COUNT,
+      .dma_buf_len = AUDIO_DMA_BUF_LEN,
     };
 
     i2s_pin_config_t pin_config = {
@@ -56,15 +56,24 @@ public:
     if (!_started) return;
     _playing = true;
     size_t written;
-    float gain = vol / 128.0f;
-    if (gain != 1.0f && gain >= 0.0f) {
-      for (size_t i = 0; i < samples; i++) {
-        const_cast<int16_t*>(data)[i] = (int16_t)(data[i] * gain);
-      }
-    }
     _writeUs = micros();
-    _writeBytes = samples * 2;
-    i2s_write(I2S_NUM_0, data, samples * 2, &written, portMAX_DELAY);
+    _writeBytes = samples * 4;  // stereo: 2 bytes per sample × 2 channels
+    // Duplicate mono samples into L+R stereo pairs for I2S_CHANNEL_FMT_RIGHT_LEFT
+    // Write in chunks to avoid allocating a large temporary buffer
+    const size_t CHUNK = 256;  // stereo samples per chunk
+    int16_t stereo[CHUNK * 2];
+    size_t remaining = samples;
+    const int16_t* src = data;
+    while (remaining > 0) {
+      size_t n = (remaining > CHUNK) ? CHUNK : remaining;
+      for (size_t i = 0; i < n; i++) {
+        stereo[i * 2]     = src[i];  // Left
+        stereo[i * 2 + 1] = src[i];  // Right (duplicate)
+      }
+      i2s_write(I2S_NUM_0, stereo, n * 4, &written, portMAX_DELAY);
+      src += n;
+      remaining -= n;
+    }
   }
 
   void startClocks() {
@@ -80,7 +89,7 @@ public:
   bool isPlaying(int = 0) {
     if (!_started || !_playing) return false;
     uint64_t elapsed = micros() - _writeUs;
-    uint64_t expected = (uint64_t)_writeBytes * 1000000 / (2 * _sampleRate);
+    uint64_t expected = (uint64_t)_writeBytes * 1000000 / (4 * _sampleRate);  // 4 bytes per stereo sample pair
     return elapsed < expected;
   }
 
