@@ -17,17 +17,19 @@
 | SRAM | 512 KB (+ 384 KB ROM) |
 | Display | 1.54" IPS, 240×240, 262K colors, ST7789V2, 4-wire SPI |
 | Touch | CST816T capacitive (I2C `0x15`) — Touch version only |
-| Audio DAC | ES8311 (I2C `0x18`) + NS4150B amplifier |
+| Audio DAC | ES8311 (I2C `0x18`) + NS4150B amplifier, mono 3W max |
 | Audio ADC | ES7210 (I2C `0x40`) — dual mic, echo cancellation |
 | IMU | QMI8658 (6-axis: accel + gyro, I2C `0x6B`) |
-| RTC | PCF85063 (I2C) |
+| RTC | PCF85063 (I2C `0x51`) |
+| PMU | AXP2101 — power management, battery charging, power-on control |
 | Battery | MX1.25 2-pin, 3.7V LiPo, with charger management |
 | Speaker | MX1.25 2-pin header (non-polarized) |
 | USB | Type-C (native ESP32-S3 USB) |
 | WiFi | 2.4 GHz 802.11 b/g/n |
-| Bluetooth | BLE 5 |
-| Buttons | BOOT (GPIO0), PWR (GPIO5), PLUS (GPIO4) |
+| Bluetooth | Bluetooth 5 (LE) |
+| Buttons | BOOT/- (GPIO0), PWR (GPIO5), +/Key (GPIO4) |
 | SD Card | microSD via SD_MMC (4-bit mode) |
+| Camera | FPC connector for OV2640/OV5640 cameras |
 
 ---
 
@@ -46,15 +48,15 @@
 | TFT_BL | 46 | Backlight PWM |
 
 **SPI:** Mode 0 (CPOL=0, CPHA=0), MSB first.
-**Display:** `Arduino_ESP32SPI(45 /* DC */, 21 /* CS */, 38 /* SCK */, 39 /* MOSI */)` con `Arduino_ST7789(bus, 40 /* RST */, 0 /* rotation */, true /* IPS */, 240, 240)`.
-**IPS invert:** `invert_colors: true` (ST7789V2 en este panel requiere inversión de color).
+**Display:** `Arduino_ESP32SPI(45 /* DC */, 21 /* CS */, 38 /* SCK */, 39 /* MOSI */)` with `Arduino_ST7789(bus, 40 /* RST */, 0 /* rotation */, true /* IPS */, 240, 240)`.
+**IPS invert:** `invert_colors: true` (ST7789V2 on this panel requires color inversion).
 
 ### Touch (CST816T) — I2C
 
 | Signal | GPIO | Notes |
 |--------|------|-------|
-| TP_SDA | 42 | I2C Data (bus compartido) |
-| TP_SCL | 41 | I2C Clock (bus compartido) |
+| TP_SDA | 42 | I2C Data (shared bus) |
+| TP_SCL | 41 | I2C Clock (shared bus) |
 | TP_INT | 48 | Interrupt (active low) |
 | TP_RST | 47 | Reset (active low) |
 
@@ -73,7 +75,7 @@
 ### Audio Codec Config (ES8311)
 
 - **I2C:** SDA=GPIO42, SCL=GPIO41, addr=`0x18`
-- **I2C bus:** Compartido con CST816T, QMI8658, ES7210 y PCF85063
+- **I2C bus:** Shared with CST816T, QMI8658, ES7210 and PCF85063
 
 ### Audio ADC (ES7210)
 
@@ -94,25 +96,25 @@
 | SD_D2 | 13 |
 | SD_D3 | 14 |
 
-Se inicializa con: `SD_MMC.setPins(16, 15, 17, 18, 13, 14)`.
+Initialized with: `SD_MMC.setPins(16, 15, 17, 18, 13, 14)`.
 
 ### Buttons
 
 | Button | GPIO | Notes |
 |--------|------|-------|
-| BOOT | 0 | Pull-up interno, LOW = pressed. Boot = download mode al holdear + power |
-| PWR | 5 | Control de alimentación |
-| PLUS | 4 | Botón personalizable |
+| BOOT/- | 0 | Internal pull-up, LOW = pressed. Hold + power cycle for download mode |
+| PWR | 5 | Power control, connected to AXP2101 PMU |
+| +/Key | 4 | Customizable button |
 
 ### Power & Battery
 
 | Signal | GPIO | Notes |
 |--------|------|-------|
-| BAT_EN | 2 | Power latch — mantener HIGH para que el dispositivo se mantenga encendido en batería |
-| BAT_ADC | 1 | ADC para medir voltaje de batería (divisor 200k+100k → ×3) |
-| CHG_STAT | 3 | Estado de carga (LOW = cargando, open-drain) |
+| BAT_EN | 2 | Power latch — keep HIGH to stay powered on battery |
+| BAT_ADC | 1 | ADC for battery voltage measurement (divider 200k+100k → ×3) |
+| CHG_STAT | 3 | Charge status (LOW = charging, open-drain) |
 
-### I2C Bus (compartido: GPIO42=SCL, GPIO41=SDA)
+### I2C Bus (shared: GPIO42=SDA, GPIO41=SCL)
 
 | Device | Address |
 |--------|---------|
@@ -120,9 +122,9 @@ Se inicializa con: `SD_MMC.setPins(16, 15, 17, 18, 13, 14)`.
 | CST816T (touch) | `0x15` |
 | QMI8658 (IMU) | `0x6B` |
 | ES7210 (audio ADC) | `0x40` |
-| PCF85063 (RTC) | — |
+| PCF85063 (RTC) | `0x51` |
 
-### Pads Externos
+### External Headers
 
 | Interface | GPIOs |
 |-----------|-------|
@@ -130,11 +132,21 @@ Se inicializa con: `SD_MMC.setPins(16, 15, 17, 18, 13, 14)`.
 | UART | TX=GPIO43, RX=GPIO44 |
 | USB | D-=GPIO19, D+=GPIO20 |
 
+### Additional Board Features
+
+| Feature | Description |
+|---------|-------------|
+| Camera FPC | 24-pin connector for OV2640/OV5640 cameras |
+| Antenna | Onboard PCB antenna + IPEX 1 connector (switchable via resistor) |
+| RTC Battery | SH1.0 2-pin connector for rechargeable RTC battery |
+| Charging LED | Red LED (D2) — lit during charging |
+| Power LED | Green LED (D1) — lit when powered |
+
 ---
 
-## Conector Display FPC — 12 pines
+## Display FPC Connector — 12 pins
 
-| Pin | Señal |
+| Pin | Signal |
 |-----|-------|
 | 1 | VCC (3.3V) |
 | 2 | GND |
@@ -151,7 +163,7 @@ Se inicializa con: `SD_MMC.setPins(16, 15, 17, 18, 13, 14)`.
 
 ---
 
-## Configuración de Build
+## Build Configuration
 
 ### PlatformIO (`platformio.ini`)
 
@@ -199,15 +211,15 @@ lib_deps =
 - Flash Size: **16MB**
 - Partition Scheme: **Default 16MB**
 - USB CDC On Boot: **Enabled**
-- PSRAM: **Octal 80MHz** (si se usa)
+- PSRAM: **Octal 80MHz** (if used)
 
 ---
 
-## Fuentes
+## Sources
 
-La información de este documento proviene de:
+The information in this document comes from:
 
-1. **Waveshare docs oficiales:** https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54
-2. **Ejemplos Arduino oficiales** (del repositorio de Waveshare) — `04_gfx_helloworld`, `06_gfx_u8g2_font`, `07_sd_card_test`, `01_audio_out`
-3. **Página de producto:** https://www.waveshare.com/esp32-s3-lcd-1.54.htm?sku=33869
-4. **Documentación de la comunidad:** ESPHome config verificada en hardware real (SKU 33869)
+1. **Waveshare official docs:** https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54
+2. **Official Arduino examples** (from the Waveshare repository) — `04_gfx_helloworld`, `06_gfx_u8g2_font`, `07_sd_card_test`, `01_audio_out`
+3. **Product page:** https://www.waveshare.com/esp32-s3-lcd-1.54.htm?sku=33869
+4. **Community documentation:** ESPHome config verified on real hardware (SKU 33869)

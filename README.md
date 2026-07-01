@@ -2,46 +2,35 @@
 
 ![CoreM5S3 TV Logo](assets/corem5s3-tv-logo.png)
 
-Turn your M5Stack CoreS3 SE into a standalone retro TV that plays episodes with a CRT-like experience. No menus, no navigation — just power on and watch.
+Turn your ESP32-S3-based board into a standalone retro TV that plays episodes with a CRT-like experience. No menus, no navigation — just power on and watch.
+
+## Supported Hardware
+
+### M5Stack CoreS3 SE
+- **Display:** 2.0" IPS 320×240 ILI9342C (SPI)
+- **Audio:** AW88298 I2S amp + 1 W speaker
+- **SD:** SPI mode (CS=4, MOSI=37, MISO=35, SCK=36)
+
+### Waveshare ESP32-S3-Touch-LCD-1.54
+- **Display:** 1.54" IPS 240×240 ST7789V2 (SPI)
+- **Audio:** ES8311 DAC + NS4150B amp (3W mono)
+- **SD:** SD_MMC 4-bit mode (CLK=16, CMD=15, D0=17, D1=18, D2=13, D3=14)
+- **Touch:** CST816T capacitive (GPIO42/41 I2C)
+- **Buttons:** BOOT/- (GPIO0), PWR (GPIO5), +/Key (GPIO4)
 
 ## Quick Start
 
 ```bash
-# 1. Convert episodes
-python3 tools/convert_episodes.py --input ~/Videos/Simpsons --output /Volumes/SDCARD
+# 1. Convert episodes (for Waveshare use --width 240 --height 240)
+python3 tools/convert_episodes.py --input ~/Videos/Simpsons --output /Volumes/SDCARD --width 240 --height 240
 
-# 2. Build and flash firmware
-cd firmware && pio run --target upload
+# 2. Build and flash firmware (select your board)
+cd firmware
+pio run -e waveshare-s3-touch-lcd-154 --target upload   # Waveshare
+pio run -e m5stack-cores3-se --target upload              # M5Stack CoreS3 SE
 
 # 3. Insert SD card, power on
 ```
-
-## Photos
-
-| Playing 1 | Playing 2 |
-|-----------|-----------|
-| ![Playing 1](assets/screen-playing-1.jpg) | ![Playing 2](assets/screen-playing-2.jpg) |
-
-| Playing 3 | Playing 4 |
-|-----------|-----------|
-| ![Playing 3](assets/screen-playing-3.jpg) | ![Playing 4](assets/screen-playing-4.jpg) |
-
-| Playing 5 |
-|-----------|
-| ![Playing 5](assets/screen-playing.jpg) |
-
-## Hardware
-
-| Component | Spec |
-|-----------|------|
-| **Board** | M5Stack CoreS3 SE |
-| **SoC** | ESP32-S3, dual-core Xtensa LX7 @ 240 MHz |
-| **RAM** | 512 KB SRAM + 8 MB PSRAM |
-| **Flash** | 16 MB |
-| **Display** | 2.0" IPS 320×240 ILI9342C (SPI) |
-| **Audio** | AW88298 I2S amp + 1 W speaker |
-| **Storage** | microSD (FAT32, up to 16 GB officially) |
-| **Input** | Capacitive touch, power/reset buttons |
 
 ## How It Works
 
@@ -53,9 +42,9 @@ Video file (.mp4/.mkv)
          └── ffmpeg ──► .pcm (raw 16-bit mono PCM audio)
                                   │
 SD Card ──► ESP32-S3 ──► MJPEG decode (JPEGDEC lib)
-                           ├── Apply CRT effects (scanlines, noise)
-                           ├── Push to ILI9342C display @ 320×240
-                           └── Audio sync via I2S → AW88298 speaker
+                            ├── Apply CRT effects (scanlines, noise)
+                            ├── Push to display @ 240×240 or 320×240 (SPI)
+                            └── Audio sync via I2S → speaker
 ```
 
 ### File Format
@@ -77,18 +66,18 @@ SD Card ──► ESP32-S3 ──► MJPEG decode (JPEGDEC lib)
 
 ## Storage Estimates
 
-| Item | Per 22-min episode |
-|------|-------------------|
-| Video (320×240, 15 FPS, Q8 MJPEG) | ~350 MB |
-| Audio (44.1 kHz, 16-bit, mono PCM) | ~116 MB |
-| **Total** | **~466 MB** |
+| Item | Per 22-min episode (320×240) | Per 22-min episode (240×240) |
+|------|-------------------|-------------------|
+| Video (15 FPS, Q8 MJPEG) | ~350 MB | ~200 MB |
+| Audio (44.1 kHz, 16-bit, mono PCM) | ~116 MB | ~116 MB |
+| **Total** | **~466 MB** | **~316 MB** |
 
-| SD card size | Episodes (approx) |
-|-------------|-------------------|
-| 16 GB | ~34 |
-| 32 GB | ~68 |
-| 64 GB | ~137 |
-| 128 GB | ~275+ |
+| SD card size | Episodes (320×240) | Episodes (240×240) |
+|-------------|-------------------|-------------------|
+| 16 GB | ~34 | ~51 |
+| 32 GB | ~68 | ~103 |
+| 64 GB | ~137 | ~207 |
+| 128 GB | ~275+ | ~415+ |
 
 ## Firmware
 
@@ -111,8 +100,8 @@ pio run --target monitor  # Serial monitor (115200 baud)
 
 1. Format microSD card as **FAT32** (MBR, not GPT)
 2. Copy `.mjpeg` and `.pcm` files to the **root** of the SD card
-3. Insert into CoreS3 SE
-4. Connect USB-C, flash firmware
+3. Insert the SD card into your board
+4. Connect USB-C, flash firmware (`pio run -e <env> --target upload`)
 5. Device reboots into TV mode automatically
 
 No SD card? The display shows "NO SD CARD". No `.mjpeg` files? It shows "NO .mjpeg FILES ON SD CARD".
@@ -179,7 +168,7 @@ The most important parameters for playback quality vs. storage:
 
 - **FPS**: 15 is the target. The decoder sustains ~16–18 FPS.
 - **Quality**: 8 is a good balance. 5 is near-transparent (larger files). 12+ starts to show artifacts.
-- **Resolution**: 320×240 matches the display exactly. Don't change unless you're sure.
+- **Resolution**: 320×240 for M5Stack, 240×240 for Waveshare. Don't change unless you're sure.
 - **Audio rate**: 44100 Hz gives good fidelity. 22050 Hz saves ~50% audio space.
 
 ## Project Structure
@@ -228,6 +217,7 @@ Internal SRAM (512 KB):
 | Resolution | FPS | Quality | CPU Core 0 | CPU Core 1 |
 |-----------|-----|---------|-----------|-----------|
 | 320×240 | 15 | 8 | ~5% (audio) | ~90% |
+| 240×240 | 15 | 8 | ~5% (audio) | ~70% |
 
 ## Stretch Goals
 
@@ -265,6 +255,10 @@ Internal SRAM (512 KB):
 - Check audio is 22050 Hz, 16-bit, mono
 - Hardware may need the I2S pins verified (see config.h)
 
-**Display corruption:**
+**Audio quality issues (Waveshare):**
+- The ES8311 DAC needs I2S MCLK — ensure MCLK pin (GPIO8) is enabled
+- Check that `Speaker.startClocks()` runs before ES8311 I2C access
+
+**Display corruption (M5Stack only):**
 - The SD card and display share SPI bus and GPIO35 — this is normal
 - M5GFX handles the pin sharing, but if you see corruption, try lowering SD_SPI_FREQ in config.h

@@ -4,6 +4,7 @@
 - microSD card (up to 16 GB officially supported; 32–128 GB may work)
 - FAT32 formatted (MBR partition table)
 - Class 10 / U1 or faster recommended
+- For the Waveshare board, SD_MMC 4-bit mode is used (no SPI pin conflicts)
 
 ## Formatting
 
@@ -50,11 +51,11 @@ Valid patterns:
 
 ### Storage Calculations
 
-| SD Size | Est. Episodes | Notes |
-|---------|--------------|-------|
-| 16 GB | ~35 | Official max |
-| 32 GB | ~70 | May work |
-| 64 GB | ~150 | May need exFAT format |
-| 128 GB | ~300+ | May need exFAT format |
+| SD Size | Est. Episodes (320×240) | Est. Episodes (240×240) | Notes |
+|---------|------------------------|------------------------|-------|
+| 16 GB | ~35 | ~51 | Official max |
+| 32 GB | ~70 | ~103 | May work |
+| 64 GB | ~150 | ~207 | May need exFAT format |
+| 128 GB | ~300+ | ~415+ | May need exFAT format |
 
 > Note: Cards larger than 32 GB are often factory-formatted as exFAT. The ESP32's FAT32 driver does not support exFAT. You must reformat larger cards to FAT32 using a third-party tool.

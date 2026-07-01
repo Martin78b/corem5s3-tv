@@ -182,6 +182,7 @@ bool es8311_init(int sda, int scl, uint8_t addr, int sample_rate) {
   write_reg(ES8311_RESET_REG00, regv);
 
   write_reg(ES8311_CLK_MANAGER_REG01, 0x3F);
+
   write_reg(ES8311_SYSTEM_REG13, 0x10);
   write_reg(ES8311_ADC_REG1B, 0x0A);
   write_reg(ES8311_ADC_REG1C, 0x6A);
@@ -195,8 +196,8 @@ bool es8311_init(int sda, int scl, uint8_t addr, int sample_rate) {
   write_reg(ES8311_CLK_MANAGER_REG08, 0xFF);
   write_reg(ES8311_CLK_MANAGER_REG06, 0x03);
 
-  write_reg(ES8311_SDPIN_REG09, 0x04);   // I2S standard, 16-bit
-  write_reg(ES8311_SDPOUT_REG0A, 0x04);  // I2S standard, 16-bit
+  write_reg(ES8311_SDPIN_REG09, 0x0C);   // 16-bit SDP word length
+  write_reg(ES8311_SDPOUT_REG0A, 0x0C);  // 16-bit SDP word length
 
   write_reg(ES8311_ADC_REG17, 0xBF);
   write_reg(ES8311_SYSTEM_REG0E, 0x02);
@@ -204,7 +205,7 @@ bool es8311_init(int sda, int scl, uint8_t addr, int sample_rate) {
   write_reg(ES8311_SYSTEM_REG14, 0x1A);
   write_reg(ES8311_SYSTEM_REG0D, 0x01);
   write_reg(ES8311_ADC_REG15, 0x40);
-  write_reg(ES8311_DAC_REG37, 0x10);
+  write_reg(ES8311_DAC_REG37, 0x08);
   write_reg(ES8311_GP_REG45, 0x00);
 
   write_reg(ES8311_DAC_REG32, 0xFF);

@@ -293,7 +293,7 @@ void loop() {
         bootPressMs = 0;
       }
     }
-    // PLUS button (GPIO4): short press = prev channel
+    // +/Key button (GPIO4): short press = prev channel
     if (digitalRead(BTN_PLUS) == LOW) {
       static uint32_t plusPressMs = 0;
       if (plusPressMs == 0) {
