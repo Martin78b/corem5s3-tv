@@ -32,6 +32,7 @@ public:
     };
 
     i2s_pin_config_t pin_config = {
+      .mck_io_num = mclk,
       .bck_io_num = bclk,
       .ws_io_num = ws,
       .data_out_num = dout,
@@ -43,11 +44,6 @@ public:
 
     err = i2s_set_pin(I2S_NUM_0, &pin_config);
     if (err != ESP_OK) { log_e("I2S set pin failed"); return false; }
-
-    if (mclk >= 0) {
-      gpio_set_direction((gpio_num_t)mclk, GPIO_MODE_OUTPUT);
-      gpio_matrix_out((gpio_num_t)mclk, I2S0_MCLK_OUT_IDX, false, false);
-    }
 
     _started = true;
 
