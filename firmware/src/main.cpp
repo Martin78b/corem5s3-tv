@@ -17,6 +17,12 @@
 #include <driver/i2c.h>
 #endif
 
+#if defined(GENERIC_154) || defined(WAVESHARE_154)
+#include "logo_240.h"
+#else
+#include "logo_320.h"
+#endif
+
 #if defined(M5STACK) || defined(WAVESHARE_154)
 #define TOUCH_SUPPORT 1
 #endif
@@ -80,7 +86,7 @@ static void checkPowerOff() {
   if (btnPressed) {
     if (pwrPressStart == 0) {
       pwrPressStart = millis();
-    } else if (millis() - pwrPressStart > 2000) {
+    } else if (millis() - pwrPressStart > 3000) {
       if (s_framebuffer) {
         showTVStatic(STATIC_TRANSITION_MS);
       }
@@ -92,6 +98,8 @@ static void checkPowerOff() {
     pwrPressStart = 0;
   }
 }
+#else
+static void checkPowerOff() {}
 #endif
 
 void setup() {
@@ -637,12 +645,10 @@ static void showBootAnimation() {
   }
 
   Display.fillScreen(TFT_BLACK);
-  Display.setTextSize(2);
-  Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  Display.drawString("CoreM5S3 TV", 60, 60);
-  Display.setTextSize(1);
-  Display.drawString("Channel 3", 110, 100);
-  Display.drawString("Loading...", 110, 130);
+  Display.startWrite();
+  Display.setAddrWindow(0, 0, LOGO_W, LOGO_H);
+  displayWritePixels((uint16_t *)LOGO_DATA, LOGO_W * LOGO_H);
+  Display.endWrite();
   delay(1500);
 }
 

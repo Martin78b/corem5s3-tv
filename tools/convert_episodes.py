@@ -99,7 +99,7 @@ def convert_to_mjpeg(
             "-i", input_path,
             "-c:v", "mjpeg",
             "-q:v", str(quality),
-            "-vf", f"fps={fps},scale={width}:{height}:flags=lanczos",
+            "-vf", f"fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
             "-an",
             temp_pattern,
         ]
