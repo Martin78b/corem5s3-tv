@@ -101,3 +101,7 @@ uint32_t AudioPlayer::getPlaybackTimeUs() {
   uint64_t elapsed = micros() - _startUs;
   return (uint32_t)elapsed;
 }
+
+uint32_t AudioPlayer::totalSamples() const {
+  return _totalSamples;
+}

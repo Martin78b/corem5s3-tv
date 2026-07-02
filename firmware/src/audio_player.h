@@ -16,6 +16,7 @@ public:
   bool isPlaying();
   void setVolume(uint8_t vol);
   uint32_t getPlaybackTimeUs();
+  uint32_t totalSamples() const;
 
 private:
   File _file;
@@ -28,6 +29,6 @@ private:
   size_t _fillSamples;
   int _playIdx;
   uint8_t _volume;
-  uint64_t _totalSamples;
+  volatile uint32_t _totalSamples;
   uint64_t _startUs;
 };

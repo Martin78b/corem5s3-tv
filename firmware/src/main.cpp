@@ -44,6 +44,7 @@ static int s_playlistSize = 0;
 static uint32_t s_lastTouchMs = 0;
 static uint32_t s_episodeStartMs = 0;
 static bool s_firstFrame = true;
+static uint32_t s_nextFrameToShow = 0;
 
 #ifndef M5STACK
 TFT_eSPI Display;
@@ -395,15 +396,12 @@ void loop() {
     return;
   }
 
-  // Frame pacing - skip early frames
-  static uint32_t lastFrameUs = 0;
-  uint32_t nowUs = micros();
-  uint32_t frameInterval = 1000000 / VIDEO_FPS;
-  if (nowUs - lastFrameUs < frameInterval) {
+  // Frame pacing - driven by audio progress to prevent A/V drift
+  uint64_t audioSamples = s_audio.totalSamples();
+  if (audioSamples * VIDEO_FPS < (uint64_t)s_nextFrameToShow * AUDIO_SAMPLE_RATE) {
     delay(1);
     return;
   }
-  lastFrameUs = nowUs;
 
   // Read and decode frame
   bool decoded = false;
@@ -427,6 +425,7 @@ void loop() {
   Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
   displayWritePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
   Display.endWrite();
+  s_nextFrameToShow++;
 
   uint32_t nowMs = millis();
   if (nowMs < s_channelOsdEnd) {
@@ -571,7 +570,10 @@ static void buildPlaylist(bool shuffle) {
 }
 
 static void nextEpisode() {
-  s_playlistIndex = (s_playlistIndex + 1) % s_playlistSize;
+  s_playlistIndex++;
+  if (s_playlistIndex >= s_playlistSize) {
+    buildPlaylist(true);
+  }
   s_channelNumber = (s_channelNumber % 99) + 1;
   playEpisode(s_playlist[s_playlistIndex]);
 }
@@ -611,6 +613,7 @@ static void playEpisode(int index) {
   }
 
   s_firstFrame = true;
+  s_nextFrameToShow = 0;
   s_currentEpisode = index;
   s_playing = true;
   s_channelOsdEnd = millis() + CHANNEL_OSD_MS;
