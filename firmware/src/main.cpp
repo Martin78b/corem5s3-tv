@@ -45,6 +45,8 @@ static uint32_t s_lastTouchMs = 0;
 static uint32_t s_episodeStartMs = 0;
 static bool s_firstFrame = true;
 static uint32_t s_nextFrameToShow = 0;
+static uint32_t s_audioFinishedAt = 0;
+static bool s_audioEndHandled = false;
 
 #ifndef M5STACK
 TFT_eSPI Display;
@@ -58,6 +60,7 @@ static bool initSDCard();
 static void buildPlaylist(bool shuffle);
 static void playEpisode(int index);
 static void nextEpisode();
+static void prevEpisode();
 static void showTVStatic(uint32_t durationMs);
 static void showChannelOSD(int channel);
 static void showBootAnimation();
@@ -336,9 +339,7 @@ void loop() {
         plusPressMs = millis();
       } else if (millis() - plusPressMs > 50) {
         showTVStatic(800);
-        s_channelNumber =
-            (s_channelNumber <= 1) ? s_episodeCount : s_channelNumber - 1;
-        playEpisode(s_playlist[s_channelNumber - 1]);
+        prevEpisode();
         while (digitalRead(BTN_PLUS) == LOW)
           delay(10);
         plusPressMs = 0;
@@ -352,26 +353,23 @@ void loop() {
   handleTouch();
 #endif
 
-  static uint32_t audioFinishedAt = 0;
-  static bool audioEndHandled = true;
-
   if (!s_playing) {
     if (!s_staticTransition) {
       s_staticTransition = true;
       s_staticStart = millis();
     }
 
-    if (audioFinishedAt == 0) {
-      audioFinishedAt = millis();
+    if (s_audioFinishedAt == 0) {
+      s_audioFinishedAt = millis();
     }
 
-    if (millis() - audioFinishedAt > 200) {
+    if (millis() - s_audioFinishedAt > 200) {
       if (!s_audio.isPlaying()) {
         showTVStatic(1500);
         nextEpisode();
-        audioFinishedAt = 0;
+        s_audioFinishedAt = 0;
         s_staticTransition = false;
-        audioEndHandled = false;
+        s_audioEndHandled = false;
       }
     }
     delay(10);
@@ -379,11 +377,11 @@ void loop() {
   }
 
   if (!s_audio.isPlaying()) {
-    if (!audioEndHandled) {
-      audioEndHandled = true;
-      audioFinishedAt = millis();
+    if (!s_audioEndHandled) {
+      s_audioEndHandled = true;
+      s_audioFinishedAt = millis();
     }
-    if (millis() - audioFinishedAt > 500) {
+    if (millis() - s_audioFinishedAt > 500) {
       s_playing = false;
       s_video.close();
     }
@@ -444,9 +442,7 @@ static void handleTouch() {
     s_lastTouchMs = now;
     if (t.x < DISPLAY_WIDTH / 2) {
       showTVStatic(800);
-      s_channelNumber =
-          (s_channelNumber <= 1) ? s_episodeCount : s_channelNumber - 1;
-      playEpisode(s_playlist[s_channelNumber - 1]);
+      prevEpisode();
     } else {
       showTVStatic(800);
       nextEpisode();
@@ -501,9 +497,7 @@ static void handleTouch() {
   (void)ty; // unused but available
   if (tx < DISPLAY_WIDTH / 2) {
     showTVStatic(800);
-    s_channelNumber =
-        (s_channelNumber <= 1) ? s_episodeCount : s_channelNumber - 1;
-    playEpisode(s_playlist[s_channelNumber - 1]);
+    prevEpisode();
   } else {
     showTVStatic(800);
     nextEpisode();
@@ -574,7 +568,16 @@ static void nextEpisode() {
   if (s_playlistIndex >= s_playlistSize) {
     buildPlaylist(true);
   }
-  s_channelNumber = (s_channelNumber % 99) + 1;
+  s_channelNumber = s_playlistIndex + 1;
+  playEpisode(s_playlist[s_playlistIndex]);
+}
+
+static void prevEpisode() {
+  s_playlistIndex--;
+  if (s_playlistIndex < 0) {
+    s_playlistIndex = s_playlistSize - 1;
+  }
+  s_channelNumber = s_playlistIndex + 1;
   playEpisode(s_playlist[s_playlistIndex]);
 }
 
@@ -617,6 +620,9 @@ static void playEpisode(int index) {
   s_currentEpisode = index;
   s_playing = true;
   s_channelOsdEnd = millis() + CHANNEL_OSD_MS;
+
+  s_audioFinishedAt = 0;
+  s_audioEndHandled = false;
 }
 
 static void showTVStatic(uint32_t durationMs) {
