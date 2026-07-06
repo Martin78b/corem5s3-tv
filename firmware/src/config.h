@@ -94,6 +94,9 @@
 #define CHANNEL_OSD_MS 2000
 #define STATIC_TRANSITION_MS 1000
 
+// ── CRT Off Animation ──
+#define CRT_OFF_ANIM_MS 700
+
 // ── Touch Zones ──
 #define TOUCH_TAP_MS 300
 #define TOUCH_DEBOUNCE_MS 500

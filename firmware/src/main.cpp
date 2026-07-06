@@ -68,6 +68,7 @@ static void showTVStatic(uint32_t durationMs);
 static void showChannelOSD(int channel);
 static void showBatteryOSD(const BatteryMonitor::State& bat);
 static void showBootAnimation();
+static void showCRTOffAnimation();
 static void handleTouch();
 
 static void audioTask(void *arg) {
@@ -96,7 +97,7 @@ static void checkPowerOff() {
       pwrPressStart = millis();
     } else if (millis() - pwrPressStart > 3000) {
       if (s_framebuffer) {
-        showTVStatic(STATIC_TRANSITION_MS);
+        showCRTOffAnimation();
       }
       digitalWrite(2, LOW);
       delay(100);
@@ -316,7 +317,7 @@ void loop() {
         longPressHandled = false;
       } else if (!longPressHandled && millis() - pwrPressStart > 2000) {
         longPressHandled = true;
-        showTVStatic(STATIC_TRANSITION_MS);
+        showCRTOffAnimation();
         digitalWrite(2, LOW);
         delay(100);
         esp_deep_sleep_start();
@@ -685,6 +686,63 @@ static void showBootAnimation() {
   displayWritePixels((uint16_t *)LOGO_DATA, LOGO_W * LOGO_H);
   Display.endWrite();
   delay(1500);
+}
+
+static void showCRTOffAnimation() {
+  int cx = DISPLAY_WIDTH / 2;
+  int cy = DISPLAY_HEIGHT / 2;
+
+  // Phase 1: Vertical squeeze to horizontal line (~200ms)
+  int frames1 = 20;
+  for (int i = 0; i <= frames1; i++) {
+    float t = (float)i / frames1;
+    t = t * t;
+    int h = DISPLAY_HEIGHT - (int)(t * (DISPLAY_HEIGHT - 1));
+    if (h < 1) h = 1;
+    int top = cy - h / 2;
+    int bot = cy + h / 2 + (h % 2);
+
+    Display.startWrite();
+    if (top > 0)
+      Display.fillRect(0, 0, DISPLAY_WIDTH, top, TFT_BLACK);
+    if (bot < DISPLAY_HEIGHT)
+      Display.fillRect(0, bot, DISPLAY_WIDTH, DISPLAY_HEIGHT - bot, TFT_BLACK);
+    Display.endWrite();
+    delay(10);
+  }
+
+  // Phase 2: Horizontal squeeze to center dot (~150ms)
+  int frames2 = 15;
+  for (int i = 0; i <= frames2; i++) {
+    float t = (float)i / frames2;
+    t = t * t;
+    int w = DISPLAY_WIDTH - (int)(t * (DISPLAY_WIDTH - 4));
+    if (w < 4) w = 4;
+    int left = cx - w / 2;
+    int right = cx + w / 2;
+
+    Display.startWrite();
+    if (left > 0)
+      Display.fillRect(0, cy - 1, left, 3, TFT_BLACK);
+    if (right < DISPLAY_WIDTH)
+      Display.fillRect(right, cy - 1, DISPLAY_WIDTH - right, 3, TFT_BLACK);
+    Display.endWrite();
+    delay(10);
+  }
+
+  // Phase 3: Bright dot fades out (~120ms)
+  int frames3 = 10;
+  for (int i = 0; i < frames3; i++) {
+    float t = (float)i / frames3;
+    uint8_t brightness = (uint8_t)(255 * (1.0f - t));
+    uint16_t color = Display.color565(brightness, brightness, brightness);
+    int r = 2 - (int)(t * 1.5f);
+    if (r < 1) r = 1;
+    Display.fillCircle(cx, cy, r, color);
+    delay(10);
+  }
+
+  Display.fillScreen(TFT_BLACK);
 }
 
 static void showChannelOSD(int channel) {
