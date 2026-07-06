@@ -74,6 +74,12 @@
 #define TOUCH_ADDR 0x15
 #endif
 
+// ── Battery (Waveshare) ──
+#ifdef WAVESHARE_154
+#define BAT_ADC_PIN  1   // GPIO1 - ADC battery voltage (divider x3)
+#define BAT_CHG_STAT 3   // GPIO3 - charge status (LOW=charging)
+#endif
+
 // ── CRT Effects ──
 #define CRT_SCANLINE_ALPHA 48
 #define CRT_NOISE_PIXELS 16

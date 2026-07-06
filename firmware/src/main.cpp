@@ -8,6 +8,7 @@
 
 #include "audio_hal.h"
 #include "audio_player.h"
+#include "battery_monitor.h"
 #include "config.h"
 #include "crt_effects.h"
 #include "display_hal.h"
@@ -47,6 +48,8 @@ static bool s_firstFrame = true;
 static uint32_t s_nextFrameToShow = 0;
 static uint32_t s_audioFinishedAt = 0;
 static bool s_audioEndHandled = false;
+static bool s_lowBatteryWarned = false;
+static uint32_t s_batteryOsdEnd = 0;
 
 #ifndef M5STACK
 TFT_eSPI Display;
@@ -63,6 +66,7 @@ static void nextEpisode();
 static void prevEpisode();
 static void showTVStatic(uint32_t durationMs);
 static void showChannelOSD(int channel);
+static void showBatteryOSD(const BatteryMonitor::State& bat);
 static void showBootAnimation();
 static void handleTouch();
 
@@ -166,6 +170,8 @@ void setup() {
 #endif
 
   showBootAnimation();
+
+  BatteryMonitor::begin();
 
 #ifdef TOUCH_RST
   // Reset touch (and ES8311 if shared) before initializing audio codec
@@ -429,6 +435,25 @@ void loop() {
   if (nowMs < s_channelOsdEnd) {
     showChannelOSD(s_channelNumber);
   }
+
+  // Battery OSD: show 10s at episode start, or always when <= 20%
+  BatteryMonitor::State bat = BatteryMonitor::update();
+  if (nowMs < s_batteryOsdEnd || (bat.valid && bat.percentage <= 20)) {
+    showBatteryOSD(bat);
+  } else {
+    // Clear battery area when not showing
+    Display.fillRect(3, 3, 34, 14, TFT_BLACK);
+  }
+
+  // Low battery warning
+  if (bat.valid && bat.percentage <= 10 && !s_lowBatteryWarned) {
+    s_lowBatteryWarned = true;
+    showTVStatic(500);
+    Display.setTextSize(2);
+    Display.setTextColor(TFT_RED, TFT_BLACK);
+    Display.drawString("LOW BATTERY", 30, 100);
+    delay(2000);
+  }
 }
 
 #ifdef M5STACK
@@ -595,6 +620,7 @@ static void playEpisode(int index) {
   // Display.drawString("Open video...", 10, 80);
 
   s_episodeStartMs = millis();
+  s_batteryOsdEnd = millis() + 10000;  // Show battery for 10s at episode start
 
   if (xSemaphoreTake(s_sdMutex, portMAX_DELAY) == pdTRUE) {
     if (!s_video.openFile(videoPath)) {
@@ -671,4 +697,34 @@ static void showChannelOSD(int channel) {
   Display.setTextSize(1);
   Display.setTextColor(TFT_GREEN, TFT_BLACK);
   Display.drawString(buf, osdX + 6, 8);
+}
+
+static void showBatteryOSD(const BatteryMonitor::State& bat) {
+  if (!bat.valid) return;
+
+  int x = 4, y = 4;
+  int w = 24, h = 12;
+
+  Display.fillRect(x - 1, y - 1, w + 6, h + 2, TFT_BLACK);
+
+  // Battery shell
+  Display.drawRect(x, y, w, h, TFT_WHITE);
+  Display.fillRect(x + w, y + 3, 3, h - 6, TFT_WHITE);
+
+  // Fill level
+  int fillW = (w - 4) * bat.percentage / 100;
+  uint16_t color = TFT_GREEN;
+  if (bat.percentage <= 20) color = TFT_RED;
+  else if (bat.percentage <= 50) color = TFT_YELLOW;
+
+  if (fillW > 0) {
+    Display.fillRect(x + 2, y + 2, fillW, h - 4, color);
+  }
+
+  // Charging indicator
+  if (bat.charging) {
+    Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+    Display.setTextSize(1);
+    Display.drawString("C", x + w + 6, y);
+  }
 }
