@@ -55,20 +55,21 @@ public:
   void playRaw(const int16_t* data, size_t samples, uint32_t sampleRate, bool, int, uint8_t vol, bool) {
     if (!_started) return;
     _playing = true;
+    _volume = vol;
     size_t written;
     _writeUs = micros();
-    _writeBytes = samples * 4;  // stereo: 2 bytes per sample × 2 channels
-    // Duplicate mono samples into L+R stereo pairs for I2S_CHANNEL_FMT_RIGHT_LEFT
-    // Write in chunks to avoid allocating a large temporary buffer
-    const size_t CHUNK = 256;  // stereo samples per chunk
+    _writeBytes = samples * 4;
+    const size_t CHUNK = 256;
     int16_t stereo[CHUNK * 2];
     size_t remaining = samples;
     const int16_t* src = data;
     while (remaining > 0) {
       size_t n = (remaining > CHUNK) ? CHUNK : remaining;
+      uint8_t v = _volume;
       for (size_t i = 0; i < n; i++) {
-        stereo[i * 2]     = src[i];  // Left
-        stereo[i * 2 + 1] = src[i];  // Right (duplicate)
+        int32_t s = (int32_t)src[i] * v / 255;
+        stereo[i * 2]     = (int16_t)s;
+        stereo[i * 2 + 1] = (int16_t)s;
       }
       i2s_write(I2S_NUM_0, stereo, n * 4, &written, portMAX_DELAY);
       src += n;

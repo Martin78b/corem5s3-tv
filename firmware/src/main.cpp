@@ -14,7 +14,9 @@
 #include "display_hal.h"
 #include "video_player.h"
 #ifdef WAVESHARE_154
+#include "backlight.h"
 #include "es8311.h"
+#include "gesture_control.h"
 #include <driver/i2c.h>
 #endif
 
@@ -51,6 +53,13 @@ static bool s_audioEndHandled = false;
 static bool s_lowBatteryWarned = false;
 static uint32_t s_batteryOsdEnd = 0;
 
+#ifdef WAVESHARE_154
+static GestureController s_gesture;
+#if GESTURE_DEBUG
+static struct { bool ok; uint8_t finger; int16_t x, y; } s_touchDbg = { false, 0, -1, -1 };
+#endif
+#endif
+
 #ifndef M5STACK
 TFT_eSPI Display;
 I2SSpeaker Speaker;
@@ -70,6 +79,9 @@ static void showBatteryOSD(const BatteryMonitor::State& bat);
 static void showBootAnimation();
 static void showCRTOffAnimation();
 static void handleTouch();
+#ifdef WAVESHARE_154
+static void i2c_scan();
+#endif
 
 static void audioTask(void *arg) {
   while (true) {
@@ -89,6 +101,28 @@ static void audioTask(void *arg) {
 }
 
 #ifdef WAVESHARE_154
+static void touchTask(void *arg) {
+  uint32_t lastEventEdge = 0;
+  // Wait for I2C and everything to be ready
+  vTaskDelay(pdMS_TO_TICKS(500));
+
+  // Ensure RST is HIGH (released) — setup() did this but verify
+  digitalWrite(TOUCH_RST, HIGH);
+  delay(100);  // Give CST816T time to boot after reset release
+
+  while (true) {
+    // La IRQ del CST816 es activa en bajo. Cuando esta pendiente un evento
+    // tactil muestreamos rapido para no perder el toque; en reposo, lento.
+    bool irqActive = (gpio_get_level((gpio_num_t)TOUCH_INT) == 0);
+    if (irqActive) {
+      lastEventEdge = millis();
+    }
+    bool keepFast = irqActive || (millis() - lastEventEdge < 200);
+    handleTouch();
+    vTaskDelay(pdMS_TO_TICKS(keepFast ? 5 : 30));
+  }
+}
+
 static void checkPowerOff() {
   static uint32_t pwrPressStart = 0;
   bool btnPressed = (gpio_get_level((gpio_num_t)BTN_PWR) == 0);
@@ -183,6 +217,10 @@ void setup() {
   delay(50);
 #endif
 
+#ifdef TOUCH_INT
+  pinMode(TOUCH_INT, INPUT_PULLUP);
+#endif
+
 #ifdef AUDIO_PA_CTRL
   pinMode(AUDIO_PA_CTRL, OUTPUT);
   digitalWrite(AUDIO_PA_CTRL, HIGH);
@@ -202,7 +240,7 @@ void setup() {
     i2c_cfg.scl_io_num = (gpio_num_t)41;
     i2c_cfg.sda_pullup_en = GPIO_PULLUP_ENABLE;
     i2c_cfg.scl_pullup_en = GPIO_PULLUP_ENABLE;
-    i2c_cfg.master.clk_speed = 100000;
+    i2c_cfg.master.clk_speed = 400000;  // CST816T supports up to 400kHz
     esp_err_t err = i2c_param_config(I2C_NUM_1, &i2c_cfg);
     if (err != ESP_OK) {
       log_e("I2C param_config failed: %d", err);
@@ -277,6 +315,15 @@ void setup() {
     }
   }
 
+#ifdef WAVESHARE_154
+  // Init PWM backlight on TFT_BL (GPIO46) - required for brightness swipes
+  Backlight::begin(TFT_BL, 100);
+  // Initialize gesture controller with default volume 90% and brightness 100%
+  s_gesture.begin(&s_audio, 90, 100);
+  s_audio.setVolume(GestureController::pctToHwVolume(90));
+  es8311_set_volume(255); // 0dB (full volume for ES8311 DAC)
+#endif
+
   s_episodeCount = VideoPlayer::scanEpisodes(s_episodes, MAX_EPISODES);
   if (s_episodeCount == 0) {
     Display.setTextSize(2);
@@ -293,6 +340,9 @@ void setup() {
   // Display.drawString("Found episodes", 10, 210);
 
   xTaskCreatePinnedToCore(audioTask, "audio", 16384, NULL, 5, NULL, 0);
+#ifdef WAVESHARE_154
+  xTaskCreatePinnedToCore(touchTask, "touch", 8192, NULL, 1, NULL, 0);
+#endif
 
   buildPlaylist(true);
   // Display.drawString("Playlist OK", 10, 220);
@@ -446,6 +496,11 @@ void loop() {
     Display.fillRect(3, 3, 34, 14, TFT_BLACK);
   }
 
+#ifdef WAVESHARE_154
+  // Render gesture OSD overlay on top of video frame
+  s_gesture.renderOSD();
+#endif
+
   // Low battery warning
   if (bat.valid && bat.percentage <= 10 && !s_lowBatteryWarned) {
     s_lowBatteryWarned = true;
@@ -476,57 +531,92 @@ static void handleTouch() {
   }
 }
 #elif defined(WAVESHARE_154)
+
+// ── I2C scan: probe addresses and log found devices ──
+static void i2c_scan() {
+  Serial.println("I2C scan (SDA=42, SCL=41):");
+  int found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_NUM_1, cmd, pdMS_TO_TICKS(20));
+    i2c_cmd_link_delete(cmd);
+    if (ret == ESP_OK) {
+      Serial.printf("  0x%02X\n", addr);
+      found++;
+    }
+  }
+  if (found == 0) Serial.println("  No devices found!");
+  Serial.printf("  Total: %d\n", found);
+}
+
 static bool touchReadBytes(uint8_t reg, uint8_t *buf, size_t len) {
   i2c_cmd_handle_t cmd = i2c_cmd_link_create();
   i2c_master_start(cmd);
   i2c_master_write_byte(cmd, (TOUCH_ADDR << 1) | I2C_MASTER_WRITE, true);
   i2c_master_write_byte(cmd, reg, true);
-  i2c_master_stop(cmd);
-  esp_err_t ret = i2c_master_cmd_begin(I2C_NUM_1, cmd, pdMS_TO_TICKS(100));
-  i2c_cmd_link_delete(cmd);
-  if (ret != ESP_OK)
-    return false;
-
-  cmd = i2c_cmd_link_create();
-  i2c_master_start(cmd);
+  i2c_master_start(cmd); // repeated start
   i2c_master_write_byte(cmd, (TOUCH_ADDR << 1) | I2C_MASTER_READ, true);
   for (size_t i = 0; i < len; i++) {
     i2c_master_read_byte(cmd, &buf[i],
                          (i == len - 1) ? I2C_MASTER_NACK : I2C_MASTER_ACK);
   }
   i2c_master_stop(cmd);
-  ret = i2c_master_cmd_begin(I2C_NUM_1, cmd, pdMS_TO_TICKS(100));
+  esp_err_t ret = i2c_master_cmd_begin(I2C_NUM_1, cmd, pdMS_TO_TICKS(50));
   i2c_cmd_link_delete(cmd);
   return ret == ESP_OK;
 }
 
 static void handleTouch() {
-  uint32_t now = millis();
-  if (now - s_lastTouchMs < TOUCH_DEBOUNCE_MS)
-    return;
+  // La cadencia de muestreo la controla touchTask (vTaskDelay), que ya se
+  // acelera cuando la IRQ del CST816 esta activa.
 
-  uint8_t data[5];
-  if (!touchReadBytes(0x00, data, 5))
-    return;
-  uint8_t gesture = data[0];
-  uint8_t finger = data[1];
-  if (finger == 0 || gesture == 0x00)
-    return;
+  // Ultima posicion valida conocida (para decidir izquierda/derecha en un tap)
+  static int16_t lastX = 0;
+  static int16_t lastY = 0;
 
-  s_lastTouchMs = now;
-  // Decode touch point: X = (d[2]<<4 | d[3]>>4), Y = ((d[3]&0x0F)<<8 | d[4])
-  uint16_t tx = ((uint16_t)data[2] << 4) | (data[3] >> 4);
-  uint16_t ty = ((uint16_t)(data[3] & 0x0F) << 8) | data[4];
-  tx = (uint32_t)tx * DISPLAY_WIDTH / 4096;
-  ty = (uint32_t)ty * DISPLAY_HEIGHT / 4096;
+  uint8_t data[7];
+  if (!touchReadBytes(0x00, data, sizeof(data))) {
+    s_gesture.update(0, 0, 0);
+    static uint32_t s_touchFailCount = 0;
+    static uint32_t s_touchFailLogMs = 0;
+    s_touchFailCount++;
+    if (millis() - s_touchFailLogMs >= 5000) {
+      s_touchFailLogMs = millis();
+      Serial.printf("[TOUCH] I2C fail #%u\n", s_touchFailCount);
+    }
+    return;
+  }
 
-  (void)ty; // unused but available
-  if (tx < DISPLAY_WIDTH / 2) {
+  // ── Layout CST816S (equivalente al driver oficial TouchDrvCSTXXX de Waveshare) ──
+  // reg 0x00 = status, 0x01 = GestureID, 0x02 = FingerNum,
+  // 0x03 = XH (nibble), 0x04 = XL, 0x05 = YH (nibble), 0x06 = YL
+  uint8_t fingerCount = data[2] & 0x0F;
+  GESTURE_LOG("raw f=%d g=0x%02X r0=0x%02X r3=0x%02X r4=0x%02X r5=0x%02X r6=0x%02X",
+              fingerCount, data[1], data[0], data[3], data[4], data[5], data[6]);
+
+  if (fingerCount > 0) {
+    uint16_t rawX = ((uint16_t)(data[3] & 0x0F) << 8) | data[4];
+    uint16_t rawY = ((uint16_t)(data[5] & 0x0F) << 8) | data[6];
+    // CST816T on this board reports coordinates in display pixel space (0-239),
+    // NOT 12-bit (0-4095). Use directly with bounds clamping.
+    lastX = (rawX < DISPLAY_WIDTH) ? (int16_t)rawX : DISPLAY_WIDTH - 1;
+    lastY = (rawY < DISPLAY_HEIGHT) ? (int16_t)rawY : DISPLAY_HEIGHT - 1;
+  }
+
+  // El estado se deriva solo de FingerNum (data[2]), nunca del GestureID.
+  GestureResult result = s_gesture.update(fingerCount, lastX, lastY);
+  if (result == GestureResult::TAP) {
+#ifndef WAVESHARE_154
     showTVStatic(800);
-    prevEpisode();
-  } else {
-    showTVStatic(800);
-    nextEpisode();
+    if (lastX < DISPLAY_WIDTH / 2) {
+      prevEpisode();
+    } else {
+      nextEpisode();
+    }
+#endif
   }
 }
 #endif

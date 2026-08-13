@@ -1,5 +1,6 @@
 #include "es8311.h"
 #ifdef WAVESHARE_154
+#include <Arduino.h>
 #include <esp_log.h>
 #include <driver/i2c.h>
 #include <freertos/FreeRTOS.h>
@@ -43,7 +44,7 @@ static const char* TAG = "ES8311";
 #define ES8311_GP_REG45          0x45
 #define ES8311_CHIP_ID           0xFD
 
-#define I2C_MASTER_FREQ_HZ 100000
+#define I2C_MASTER_FREQ_HZ 400000
 #define I2C_TIMEOUT_MS 100
 
 static uint8_t _addr = 0x18;
@@ -86,33 +87,22 @@ bool es8311_init(int sda, int scl, uint8_t addr, int sample_rate) {
   if (_initialized) return true;
   _addr = addr;
 
-  // Try both I2C buses (I2C_NUM_0 and I2C_NUM_1)
-  i2c_port_t buses[] = {I2C_NUM_0, I2C_NUM_1};
-  bool found = false;
+  Serial.printf("[ES8311] Init start, addr=0x%02X\n", addr);
 
-  for (int b = 0; b < 2 && !found; b++) {
-    i2c_port_t bus = buses[b];
-    i2c_config_t conf = {};
-    conf.mode = I2C_MODE_MASTER;
-    conf.sda_io_num = (gpio_num_t)sda;
-    conf.scl_io_num = (gpio_num_t)scl;
-    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.master.clk_speed = I2C_MASTER_FREQ_HZ;
-    esp_err_t err = i2c_param_config(bus, &conf);
-    if (err != ESP_OK) { ESP_LOGE(TAG, "i2c_param_config bus %d failed: %d", bus, err); continue; }
-    err = i2c_driver_install(bus, I2C_MODE_MASTER, 0, 0, 0);
-    if (err == ESP_OK) {
-      ESP_LOGI(TAG, "I2C_NUM_%d driver installed", bus);
-    } else {
-      ESP_LOGW(TAG, "I2C_NUM_%d driver install: %d (might be already initialized — continuing)", bus, err);
-    }
+  // main.cpp already installed + configured I2C_NUM_1 for GPIO42/41 at 400kHz.
+  // Do NOT call i2c_driver_install here — the touch task is already using the
+  // bus and the install will fail with ESP_ERR_INVALID_STATE (-1).
+  i2c_port_t bus = I2C_NUM_1;
+  Serial.println("[ES8311] Using I2C_NUM_1 (already initialized by main.cpp)");
 
-    // Try multiple addresses
+  esp_err_t err = ESP_OK;
+
+  // Try multiple addresses
     uint8_t addrs[] = {addr, (uint8_t)(addr ^ 0x08), 0x10, 0x11, 0x18, 0x19, 0x1A, 0x1B};
+    bool found = false;
     for (int i = 0; i < 8 && !found; i++) {
       _addr = addrs[i];
-      // Quick probe: write 0 bytes to check if device acks
+      Serial.printf("[ES8311] Probing 0x%02X... ", _addr);
       i2c_cmd_handle_t cmd = i2c_cmd_link_create();
       i2c_master_start(cmd);
       i2c_master_write_byte(cmd, (_addr << 1) | I2C_MASTER_WRITE, true);
@@ -120,6 +110,7 @@ bool es8311_init(int sda, int scl, uint8_t addr, int sample_rate) {
       err = i2c_master_cmd_begin(bus, cmd, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
       i2c_cmd_link_delete(cmd);
       if (err == ESP_OK) {
+        Serial.print("ACK");
         uint8_t id = 0;
         // Read chip ID register (0xFD) using bus directly
         i2c_cmd_handle_t cmd2 = i2c_cmd_link_create();
@@ -137,23 +128,21 @@ bool es8311_init(int sda, int scl, uint8_t addr, int sample_rate) {
         err = i2c_master_cmd_begin(bus, cmd2, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
         i2c_cmd_link_delete(cmd2);
         if (err == ESP_OK && id != 0xFF) {
-          ESP_LOGI(TAG, "Chip ID at 0x%02X = 0x%02X", _addr, id);
+          Serial.printf("[ES8311] Chip ID at 0x%02X = 0x%02X\n", _addr, id);
         } else {
-          ESP_LOGW(TAG, "Chip ID read at 0x%02X: err=%d id=0x%02X — proceeding anyway", _addr, err, id);
+          Serial.printf("[ES8311] Chip ID read at 0x%02X: err=%d id=0x%02X — proceeding anyway\n", _addr, err, id);
         }
+        Serial.printf(" chipID=0x%02X\n", id);
         found = true;
         _bus = bus;
-        ESP_LOGI(TAG, "Device found at 0x%02X on I2C_NUM_%d", _addr, _bus);
-        break;
+        Serial.printf("[ES8311] Found at 0x%02X\n", _addr);
+      } else {
+        Serial.println(" NAK");
       }
     }
-    if (!found) {
-      ESP_LOGI(TAG, "ES8311 not found on I2C_NUM_%d", bus);
-    }
-  }
 
   if (!found) {
-    ESP_LOGE(TAG, "ES8311 not found on any I2C bus or address");
+    Serial.println("[ES8311] NOT found on I2C_NUM_1");
     return false;
   }
 
@@ -214,7 +203,7 @@ bool es8311_init(int sda, int scl, uint8_t addr, int sample_rate) {
   write_reg(ES8311_DAC_REG31, regv);
 
   _initialized = true;
-  ESP_LOGI(TAG, "ES8311 initialized at %dHz", sample_rate);
+  Serial.printf("[ES8311] Initialized successfully at %dHz, addr=0x%02X\n", sample_rate, _addr);
   return true;
 }
 

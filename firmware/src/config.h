@@ -65,7 +65,7 @@
 #define BTN_PLUS 4
 #endif
 
-// ── Touch (CST816T) ──
+// ── Touch (CST816S) ──
 #ifdef WAVESHARE_154
 #define TOUCH_SDA 42
 #define TOUCH_SCL 41
@@ -99,4 +99,8 @@
 
 // ── Touch Zones ──
 #define TOUCH_TAP_MS 300
-#define TOUCH_DEBOUNCE_MS 500
+#define TOUCH_DEBOUNCE_MS 30
+
+// ── Gesture Debug ──
+// Set to 1 to enable detailed gesture logging (may affect playback performance)
+#define GESTURE_DEBUG 1
