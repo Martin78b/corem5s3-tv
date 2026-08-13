@@ -113,12 +113,27 @@ No SD card? The display shows "NO SD CARD". No `.mjpeg` files? It shows "NO .mjp
 - **Channel OSD** → "CH XX" in top-right corner for 2 seconds per episode
 - **Episode order** → Random shuffle on each boot
 - **Loop** → Plays continuously until power-off
+- **Previous episode** → Touch left side or press - button (Waveshare)
+- **Power off** → Hold PWR button 3 seconds → CRT off animation → deep sleep
+
+### Gesture Controls (Waveshare)
+
+- **Vertical swipe** → Volume up/down with OSD indicator
+- **Horizontal swipe** → Brightness up/down with OSD indicator
+- **Tap** → Previous episode
+
+### Battery Monitoring (Waveshare)
+
+- Shows battery level OSD at episode start
+- Low battery warning at 10% with persistent OSD
+- Monitors charge status via GPIO
 
 ### CRT Effects
 
 - **Scanlines**: Every other row dimmed by 25% — classic CRT look
 - **Noise**: Random pixel noise at low opacity
 - **TV Static**: Full random grayscale between episodes
+- **Power-off animation**: CRT-style collapse effect (700ms)
 
 ## Conversion Tool
 
@@ -184,7 +199,15 @@ CoreM5S3-TV/
 │       ├── config.h               # All tunable parameters
 │       ├── video_player.h/.cpp    # MJPEG decoder + display pipeline
 │       ├── audio_player.h/.cpp    # I2S audio playback
-│       └── crt_effects.h/.cpp     # Scanlines, noise, static
+│       ├── audio_hal.h            # Hardware abstraction layer
+│       ├── display_hal.h          # Display abstraction layer
+│       ├── crt_effects.h/.cpp     # Scanlines, noise, static, power-off
+│       ├── backlight.h/.cpp       # PWM backlight control
+│       ├── battery_monitor.h      # Battery voltage/percentage monitoring
+│       ├── gesture_control.h/.cpp # Touch gesture volume/brightness
+│       ├── es8311.h/.cpp          # ES8311 DAC driver (Waveshare)
+│       ├── logo_240.h             # Boot logo for 240x240 displays
+│       └── logo_320.h             # Boot logo for 320x240 displays
 ├── tools/
 │   └── convert_episodes.py        # Episode conversion script
 └── sd_card/
@@ -201,7 +224,8 @@ PSRAM (8 MB total):
 ├── SD read buffer              4 KB
 ├── I2S DMA buffers             ~8 KB
 ├── CRT effect scratch          ~4 KB
-├── Remaining for stack/etc.  ~7.5 MB
+├── Boot logo data              ~20 KB
+├── Remaining for stack/etc.  ~7.4 MB
 └── Audio data buffer           2 KB
 
 Internal SRAM (512 KB):
@@ -221,17 +245,21 @@ Internal SRAM (512 KB):
 
 ## Stretch Goals
 
-- [ ] Random episode mode (✓ — default behavior)
+- [x] Random episode mode (✓ — default behavior)
 - [x] Channel up/down (touch or hardware buttons — needs wiring)
 - [ ] 1990s TV UI with OSD menus
-- [ ] Simpsons intro boot animation (✓ — basic animation present)
-- [ ] Volume control (via touch)
+- [x] Simpsons intro boot animation (✓ — basic animation present)
+- [x] Volume control (via touch gestures on Waveshare)
 - [ ] Sleep timer
 - [ ] Favorites list
-- [ ] Shuffle mode (✓ — default)
-- [ ] Support for Futurama + other shows
+- [x] Shuffle mode (✓ — default)
+- [x] Support for Futurama + other shows
 - [ ] WiFi streaming from NAS/Jellyfin
 - [ ] OTA firmware updates
+- [x] Battery monitoring with low-battery alerts
+- [x] CRT power-off animation
+- [x] Brightness control (via touch gestures)
+- [x] Previous episode navigation
 
 ## Troubleshooting
 
@@ -262,3 +290,18 @@ Internal SRAM (512 KB):
 **Display corruption (M5Stack only):**
 - The SD card and display share SPI bus and GPIO35 — this is normal
 - M5GFX handles the pin sharing, but if you see corruption, try lowering SD_SPI_FREQ in config.h
+
+**Touch not responding (Waveshare):**
+- Check TOUCH_RST (GPIO47) and TOUCH_INT (GPIO48) are properly connected
+- Run I2C scan at boot to verify CST816T at address 0x15
+- Ensure touch controller boots after reset release (50ms delay)
+
+**Battery OSD not showing:**
+- Battery monitoring only works on Waveshare with hardware
+- Check BAT_ADC (GPIO1) and BAT_CHG_STAT (GPIO3) connections
+- Battery percentage uses LiPo curve (3.0V=0%, 4.2V=100%)
+
+**Gesture controls not working:**
+- Ensure touch is working first (see above)
+- Check GESTURE_DEBUG in config.h for detailed logging
+- Minimum swipe distance is 15px, tap duration 300ms
