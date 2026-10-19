@@ -11,46 +11,55 @@ Antes de aplicar un ítem, verificar que las líneas citadas siguen siendo las m
 
 ## B — Bugs reales
 
-- [ ] **B1. Rectángulo negro fijo sobre el video** — `firmware/src/main.cpp:494-497`
+- [x] **B1. Rectángulo negro fijo sobre el video** — `firmware/src/main.cpp:494-497`
   Cuando el OSD de batería no se muestra, el `else` pinta `fillRect(3, 3, 34, 14, TFT_BLACK)`
   en cada frame. El frame ya redibuja toda la pantalla, así que solo deja un parche negro.
   **Fix:** eliminar el `else`.
+  ✅ Aplicado (2026-10-19): `else` eliminado.
 
-- [ ] **B2. Escritura fuera del framebuffer en `JPEGDraw`** — `firmware/src/video_player.cpp:84-96`
+- [x] **B2. Escritura fuera del framebuffer en `JPEGDraw`** — `firmware/src/video_player.cpp:84-96`
   No se recorta `draw->x + iWidth` / `draw->y + iHeight` a `DISPLAY_WIDTH/HEIGHT`.
   El conversor genera 320×240 por defecto (`tools/convert_episodes.py:32`); en la Waveshare
   (240×240) eso corrompe PSRAM.
   **Fix:** recortar ancho/alto en `JPEGDraw`; además, que el script avise o tenga un flag
   `--board waveshare` que fije 240×240.
+  ✅ Aplicado (2026-10-19): recorte en `JPEGDraw`; el script tiene `--board {m5stack,waveshare,generic}` y avisa si la resolución no coincide con ninguna placa.
 
-- [ ] **B3. Condición de carrera en audio** — `firmware/src/main.cpp:86-101`, `firmware/src/audio_player.cpp:60-71`
+- [x] **B3. Condición de carrera en audio** — `firmware/src/main.cpp:86-101`, `firmware/src/audio_player.cpp:60-71`
   - `audioTask` (core 0) llama `playFilled()` fuera del mutex, que puede hacer `_file.close()` (acceso SD sin lock).
   - `playEpisode()` (core 1) llama `playFile()` y reasigna `_playPtr/_fillPtr/_file` mientras la otra tarea los usa.
   - `s_playing` y `_playing` no son `volatile`/`std::atomic`.
   **Fix mínimo:** meter `playFilled()` + `fillNext()` dentro del mutex y marcar los flags como atómicos.
   **Fix ideal:** que solo `audioTask` toque `AudioPlayer`; `loop()` le manda comandos (play/stop) por una cola FreeRTOS.
+  ✅ Aplicado (2026-10-19), variante intermedia: nuevo `s_audioMutex` que protege todo `AudioPlayer` (audioTask y `playEpisode`); orden de locks audio → SD. `playFilled()` ya no toca la SD (el cierre al EOF lo hace `fillNext()`/`playFile()` con el mutex SD). `isPlaying()` no lee `_file`. `s_playing` y `_playing` son `std::atomic<bool>`. `s_video.close()` del loop ahora va con el mutex SD. La cola de comandos (fix ideal) queda para P3.
 
-- [ ] **B4. Debounce roto en botones BOOT/+** — `firmware/src/main.cpp:379-404`
+- [x] **B4. Debounce roto en botones BOOT/+** — `firmware/src/main.cpp:379-404`
   Si se suelta antes de 50 ms, `bootPressMs`/`plusPressMs` no vuelven a 0 → la siguiente
   pulsación dispara al instante. El `while (digitalRead(...) == LOW) delay(10)` congela el video.
   **Fix:** máquina de estados no bloqueante (reset al soltar, disparo en flanco).
+  ✅ Aplicado (2026-10-19): `DebouncedButton` + `buttonPressed()`, no bloqueante, dispara una vez por pulsación.
 
-- [ ] **B5. FPS / sample rate fijos en firmware pero configurables en el script**
+- [x] **B5. FPS / sample rate fijos en firmware pero configurables en el script**
   `config.h` fija `VIDEO_FPS 15` y `AUDIO_SAMPLE_RATE 44100`; el script acepta `--fps` y
   `--audio-rate` (y su ejemplo en la línea 10 usa `--fps 20`) → desincronía A/V.
   **Fix:** cabecera en el `.mjpeg` (magic, versión, fps, w, h, sample rate) leída en
   `VideoPlayer::openFile`, o quitar esos flags del script.
+  ✅ Aplicado (2026-10-19): cabecera de 16 bytes `CMTV` (versión, fps, w, h, sample rate) leída en `VideoPlayer::readHeader()`; los archivos sin cabecera siguen funcionando (15 fps). El ritmo usa el fps de la cabecera. `--audio-rate` eliminado del script (fijo en 44100); si la cabecera trae otra tasa, el firmware no reproduce el audio.
 
 ## D — README vs código
 
-- [ ] **D1.** README: "Tap → Previous episode" (Waveshare). El código del tap está en
+- [x] **D1.** README: "Tap → Previous episode" (Waveshare). El código del tap está en
   `#ifndef WAVESHARE_154` dentro de `#elif defined(WAVESHARE_154)` (`main.cpp:612-619`) → nunca compila.
   Decidir: implementarlo o quitarlo del README.
-- [ ] **D2.** README: mantener PWR 3 s. `loop()` usa 2 s (`main.cpp:368`); `checkPowerOff()` usa 3 s
+  ✅ Resuelto (2026-10-19): el tap se quitó del README y se eliminó el bloque muerto en `handleTouch()`. README corregido también para BOOT = siguiente y + = anterior.
+- [x] **D2.** README: mantener PWR 3 s. `loop()` usa 2 s (`main.cpp:368`); `checkPowerOff()` usa 3 s
   (`main.cpp:132`). Unificar en una sola función y una constante en `config.h`.
-- [ ] **D3.** README: estática de 2 s entre episodios. El código usa 1.5 s (`main.cpp:425`).
-- [ ] **D4.** README menciona scanlines y ruido CRT; `applyScanlines`/`applyNoise` nunca se llaman.
+  ✅ Aplicado (2026-10-19): `loop()` usa `checkPowerOff()`; constante `PWR_LONG_PRESS_MS 3000` en `config.h`.
+- [x] **D3.** README: estática de 2 s entre episodios. El código usa 1.5 s (`main.cpp:425`).
+  ✅ Resuelto (2026-10-19): README dice 1.5 s; constantes `EPISODE_STATIC_MS` / `CHANNEL_STATIC_MS` en `config.h`.
+- [x] **D4.** README menciona scanlines y ruido CRT; `applyScanlines`/`applyNoise` nunca se llaman.
   Decidir: activarlos (medir impacto en FPS) o quitarlos del README.
+  ✅ Resuelto (2026-10-19): scanlines y ruido quitados del README (las funciones siguen en el código, ver L3).
 
 ## R — Robustez
 

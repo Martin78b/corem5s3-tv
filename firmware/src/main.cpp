@@ -1,5 +1,6 @@
 #include "config.h"
 #include <Arduino.h>
+#include <atomic>
 #include <driver/gpio.h>
 #include <esp_log.h>
 #include <esp_sleep.h>
@@ -36,7 +37,7 @@ static VideoFile s_episodes[MAX_EPISODES];
 static int s_episodeCount = 0;
 static int s_currentEpisode = -1;
 static uint16_t *s_framebuffer = nullptr;
-static bool s_playing = false;
+static std::atomic<bool> s_playing{false};  // Read by audioTask (core 0)
 static bool s_staticTransition = false;
 static uint32_t s_staticStart = 0;
 static uint32_t s_channelOsdEnd = 0;
@@ -65,7 +66,9 @@ TFT_eSPI Display;
 I2SSpeaker Speaker;
 #endif
 
-static SemaphoreHandle_t s_sdMutex = NULL;
+// Lock order: s_audioMutex before s_sdMutex.
+static SemaphoreHandle_t s_sdMutex = NULL;     // Any SD card access
+static SemaphoreHandle_t s_audioMutex = NULL;  // AudioPlayer state (s_audio)
 
 static void initDisplay();
 static bool initSDCard();
@@ -85,18 +88,22 @@ static void i2c_scan();
 
 static void audioTask(void *arg) {
   while (true) {
-    if (s_playing && s_audio.isPlaying()) {
-      if (s_audio.needsFill()) {
+    bool active = false;
+    if (s_playing &&
+        xSemaphoreTake(s_audioMutex, portMAX_DELAY) == pdTRUE) {
+      active = s_audio.isPlaying();
+      if (active && s_audio.needsFill()) {
+        // May block on I2S DMA, but touches no SD, so s_sdMutex stays free
+        // for the video reader.
         s_audio.playFilled();
         if (xSemaphoreTake(s_sdMutex, portMAX_DELAY) == pdTRUE) {
           s_audio.fillNext();
           xSemaphoreGive(s_sdMutex);
         }
       }
-      vTaskDelay(1);
-    } else {
-      vTaskDelay(10);
+      xSemaphoreGive(s_audioMutex);
     }
+    vTaskDelay(active ? 1 : 10);
   }
 }
 
@@ -123,16 +130,16 @@ static void touchTask(void *arg) {
   }
 }
 
+// PWR button (GPIO5): long press = CRT off animation + deep sleep.
+// Used both from loop() and from the error screens in setup().
 static void checkPowerOff() {
   static uint32_t pwrPressStart = 0;
   bool btnPressed = (gpio_get_level((gpio_num_t)BTN_PWR) == 0);
   if (btnPressed) {
     if (pwrPressStart == 0) {
       pwrPressStart = millis();
-    } else if (millis() - pwrPressStart > 3000) {
-      if (s_framebuffer) {
-        showCRTOffAnimation();
-      }
+    } else if (millis() - pwrPressStart > PWR_LONG_PRESS_MS) {
+      showCRTOffAnimation();
       digitalWrite(2, LOW);
       delay(100);
       esp_deep_sleep_start();
@@ -140,6 +147,32 @@ static void checkPowerOff() {
   } else {
     pwrPressStart = 0;
   }
+}
+
+// Non-blocking debounced button: returns true once per press, after the pin
+// has been held LOW for BTN_DEBOUNCE_MS. Resets as soon as it is released.
+struct DebouncedButton {
+  uint8_t pin;
+  uint32_t pressStart;
+  bool fired;
+};
+
+static bool buttonPressed(DebouncedButton &btn) {
+  if (digitalRead(btn.pin) != LOW) {
+    btn.pressStart = 0;
+    btn.fired = false;
+    return false;
+  }
+  uint32_t now = millis();
+  if (btn.pressStart == 0) {
+    btn.pressStart = now ? now : 1;
+    return false;
+  }
+  if (!btn.fired && now - btn.pressStart >= BTN_DEBOUNCE_MS) {
+    btn.fired = true;
+    return true;
+  }
+  return false;
 }
 #else
 static void checkPowerOff() {}
@@ -167,6 +200,7 @@ void setup() {
   }
 
   s_sdMutex = xSemaphoreCreateMutex();
+  s_audioMutex = xSemaphoreCreateMutex();
 
 #ifdef M5STACK
   auto cfg = M5.config();
@@ -357,50 +391,18 @@ void setup() {
 void loop() {
 #ifdef WAVESHARE_154
   {
-    // PWR button (GPIO5): long press 3s = power off
-    static uint32_t pwrPressStart = 0;
-    static bool longPressHandled = false;
-    bool btnPressed = (gpio_get_level((gpio_num_t)BTN_PWR) == 0);
-    if (btnPressed) {
-      if (pwrPressStart == 0) {
-        pwrPressStart = millis();
-        longPressHandled = false;
-      } else if (!longPressHandled && millis() - pwrPressStart > 2000) {
-        longPressHandled = true;
-        showCRTOffAnimation();
-        digitalWrite(2, LOW);
-        delay(100);
-        esp_deep_sleep_start();
-      }
-    } else {
-      pwrPressStart = 0;
-      longPressHandled = false;
-    }
+    checkPowerOff();
     // BOOT button (GPIO0): short press = next channel
-    if (digitalRead(BTN_BOOT) == LOW) {
-      static uint32_t bootPressMs = 0;
-      if (bootPressMs == 0) {
-        bootPressMs = millis();
-      } else if (millis() - bootPressMs > 50) {
-        showTVStatic(800);
-        nextEpisode();
-        while (digitalRead(BTN_BOOT) == LOW)
-          delay(10);
-        bootPressMs = 0;
-      }
+    static DebouncedButton bootBtn = {BTN_BOOT, 0, false};
+    if (buttonPressed(bootBtn)) {
+      showTVStatic(CHANNEL_STATIC_MS);
+      nextEpisode();
     }
     // +/Key button (GPIO4): short press = prev channel
-    if (digitalRead(BTN_PLUS) == LOW) {
-      static uint32_t plusPressMs = 0;
-      if (plusPressMs == 0) {
-        plusPressMs = millis();
-      } else if (millis() - plusPressMs > 50) {
-        showTVStatic(800);
-        prevEpisode();
-        while (digitalRead(BTN_PLUS) == LOW)
-          delay(10);
-        plusPressMs = 0;
-      }
+    static DebouncedButton plusBtn = {BTN_PLUS, 0, false};
+    if (buttonPressed(plusBtn)) {
+      showTVStatic(CHANNEL_STATIC_MS);
+      prevEpisode();
     }
   }
 #endif
@@ -422,7 +424,7 @@ void loop() {
 
     if (millis() - s_audioFinishedAt > 200) {
       if (!s_audio.isPlaying()) {
-        showTVStatic(1500);
+        showTVStatic(EPISODE_STATIC_MS);
         nextEpisode();
         s_audioFinishedAt = 0;
         s_staticTransition = false;
@@ -440,7 +442,10 @@ void loop() {
     }
     if (millis() - s_audioFinishedAt > 500) {
       s_playing = false;
-      s_video.close();
+      if (xSemaphoreTake(s_sdMutex, portMAX_DELAY) == pdTRUE) {
+        s_video.close();
+        xSemaphoreGive(s_sdMutex);
+      }
     }
     delay(5);
     return;
@@ -453,7 +458,7 @@ void loop() {
 
   // Frame pacing - driven by audio progress to prevent A/V drift
   uint64_t audioSamples = s_audio.totalSamples();
-  if (audioSamples * VIDEO_FPS < (uint64_t)s_nextFrameToShow * AUDIO_SAMPLE_RATE) {
+  if (audioSamples * s_video.fps() < (uint64_t)s_nextFrameToShow * AUDIO_SAMPLE_RATE) {
     delay(1);
     return;
   }
@@ -491,9 +496,6 @@ void loop() {
   BatteryMonitor::State bat = BatteryMonitor::update();
   if (nowMs < s_batteryOsdEnd || (bat.valid && bat.percentage <= 20)) {
     showBatteryOSD(bat);
-  } else {
-    // Clear battery area when not showing
-    Display.fillRect(3, 3, 34, 14, TFT_BLACK);
   }
 
 #ifdef WAVESHARE_154
@@ -521,11 +523,10 @@ static void handleTouch() {
   auto t = M5.Touch.getDetail();
   if (t.wasClicked()) {
     s_lastTouchMs = now;
+    showTVStatic(CHANNEL_STATIC_MS);
     if (t.x < DISPLAY_WIDTH / 2) {
-      showTVStatic(800);
       prevEpisode();
     } else {
-      showTVStatic(800);
       nextEpisode();
     }
   }
@@ -573,7 +574,7 @@ static void handleTouch() {
   // La cadencia de muestreo la controla touchTask (vTaskDelay), que ya se
   // acelera cuando la IRQ del CST816 esta activa.
 
-  // Ultima posicion valida conocida (para decidir izquierda/derecha en un tap)
+  // Ultima posicion valida conocida
   static int16_t lastX = 0;
   static int16_t lastY = 0;
 
@@ -607,17 +608,9 @@ static void handleTouch() {
   }
 
   // El estado se deriva solo de FingerNum (data[2]), nunca del GestureID.
-  GestureResult result = s_gesture.update(fingerCount, lastX, lastY);
-  if (result == GestureResult::TAP) {
-#ifndef WAVESHARE_154
-    showTVStatic(800);
-    if (lastX < DISPLAY_WIDTH / 2) {
-      prevEpisode();
-    } else {
-      nextEpisode();
-    }
-#endif
-  }
+  // Un TAP no hace nada durante la reproduccion: esta tarea corre en core 0 y
+  // no debe llamar a playEpisode() (ver HANDOFF F1.7). Canales: botones.
+  s_gesture.update(fingerCount, lastX, lastY);
 }
 #endif
 
@@ -713,24 +706,36 @@ static void playEpisode(int index) {
   s_episodeStartMs = millis();
   s_batteryOsdEnd = millis() + 10000;  // Show battery for 10s at episode start
 
+  // Stop audioTask from touching s_audio while we swap files.
+  xSemaphoreTake(s_audioMutex, portMAX_DELAY);
   if (xSemaphoreTake(s_sdMutex, portMAX_DELAY) == pdTRUE) {
     if (!s_video.openFile(videoPath)) {
+      s_audio.stop();
       xSemaphoreGive(s_sdMutex);
+      xSemaphoreGive(s_audioMutex);
       log_e("Failed to open video");
       Display.drawString("VIDEO FAIL", 10, 100);
       return;
     }
     // Display.drawString("Video OK", 10, 100);
 
-    if (VideoPlayer::hasAudio(videoPath)) {
+    if (s_video.sampleRate() != AUDIO_SAMPLE_RATE) {
+      // I2S and the ES8311 are clocked for AUDIO_SAMPLE_RATE only.
+      log_e("Audio rate %u Hz not supported (firmware: %u Hz)",
+            s_video.sampleRate(), (unsigned)AUDIO_SAMPLE_RATE);
+      s_audio.stop();
+      Display.drawString("BAD AUDIO RATE", 10, 120);
+    } else if (VideoPlayer::hasAudio(videoPath)) {
       // Display.drawString("Has audio", 10, 120);
       s_audio.playFile(audioPath);
       // Display.drawString("Audio OK", 10, 140);
     } else {
+      s_audio.stop();
       Display.drawString("No audio", 10, 120);
     }
     xSemaphoreGive(s_sdMutex);
   }
+  xSemaphoreGive(s_audioMutex);
 
   s_firstFrame = true;
   s_nextFrameToShow = 0;

@@ -7,8 +7,8 @@ for playback on the M5Stack CoreS3 SE Simpsons TV.
 
 Usage:
     python3 convert_episodes.py --input /path/to/episodes --output /path/to/sdcard
-    python3 convert_episodes.py --input ./videos --output ./sdcard --fps 20 --quality 8
-    python3 convert_episodes.py --single episode.mp4 --output ./sdcard
+    python3 convert_episodes.py --input ./videos --output ./sdcard --board waveshare
+    python3 convert_episodes.py --single episode.mp4 --output ./sdcard --board m5stack
 
 Requirements:
     - ffmpeg (must be installed and in PATH)
@@ -29,9 +29,21 @@ from typing import Optional
 # ── Default settings ──
 DEFAULT_FPS = 15
 DEFAULT_QUALITY = 8  # JPEG quality 1-31, lower = better
-DEFAULT_WIDTH = 320
-DEFAULT_HEIGHT = 240
-DEFAULT_AUDIO_RATE = 44100
+# Fixed: the firmware clocks I2S / ES8311 at this rate (AUDIO_SAMPLE_RATE in config.h)
+AUDIO_RATE = 44100
+
+# Display resolution per board (DISPLAY_WIDTH/HEIGHT in config.h)
+BOARD_RESOLUTIONS = {
+    "m5stack": (320, 240),
+    "waveshare": (240, 240),
+    "generic": (240, 240),
+}
+DEFAULT_BOARD = "m5stack"
+
+# Header at the start of each .mjpeg, read by VideoPlayer::readHeader():
+# "CMTV" | u8 version | u8 reserved | u16 fps | u16 width | u16 height | u32 sample_rate
+MJPEG_MAGIC = b"CMTV"
+MJPEG_HEADER_VERSION = 1
 
 MJPEG_EXT = ".mjpeg"
 PCM_EXT = ".pcm"
@@ -85,7 +97,7 @@ def convert_to_mjpeg(
 ) -> bool:
     """
     Convert a video file to MJPEG format.
-    Output: [4-byte frame size][JPEG bytes]... (sequential)
+    Output: [16-byte header][4-byte frame size][JPEG bytes]... (sequential)
     """
     print(f"  Converting video: {input_path} -> {output_path}")
     print(f"    Settings: {width}x{height} @ {fps}fps, JPEG quality={quality}")
@@ -122,6 +134,8 @@ def convert_to_mjpeg(
         print(f"    Extracted {total_frames} frames")
 
         with open(output_path, "wb") as out:
+            out.write(MJPEG_MAGIC)
+            out.write(struct.pack("<BBHHHI", MJPEG_HEADER_VERSION, 0, fps, width, height, AUDIO_RATE))
             for i, frame_file in enumerate(frame_files):
                 frame_path = os.path.join(temp_dir, frame_file)
                 with open(frame_path, "rb") as f:
@@ -211,7 +225,6 @@ def convert_single(
     quality: int,
     width: int,
     height: int,
-    audio_rate: int,
     index: int,
     dry_run: bool,
 ) -> bool:
@@ -235,7 +248,7 @@ def convert_single(
 
     ok = convert_to_mjpeg(input_path, video_path, fps, quality, width, height)
     if ok:
-        ok = convert_to_pcm(input_path, audio_path, audio_rate)
+        ok = convert_to_pcm(input_path, audio_path, AUDIO_RATE)
 
     if ok:
         video_size = os.path.getsize(video_path) / (1024 * 1024)
@@ -282,7 +295,7 @@ def estimate_storage(files: list, fps: int, quality: int, width: int, height: in
 
     est_bitrate = width * height * fps * quality * 0.15 / 1000000  # rough MB/s
     est_video_mb = est_bitrate * total_duration
-    est_audio_mb = total_duration * DEFAULT_AUDIO_RATE * 2 / (1024 * 1024)
+    est_audio_mb = total_duration * AUDIO_RATE * 2 / (1024 * 1024)
 
     print(f"\n{'='*60}")
     print(f"Storage Estimate ({total_count} files, {total_duration:.0f}s total):")
@@ -300,8 +313,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --input ./videos --output /Volumes/SDCARD
-  %(prog)s --single episode.mp4 --output ./sdcard
+  %(prog)s --input ./videos --output /Volumes/SDCARD --board waveshare
+  %(prog)s --single episode.mp4 --output ./sdcard --board m5stack
   %(prog)s --input ./videos --output ./sdcard --fps 15 --quality 10
   %(prog)s --input ./videos --dry-run
         """,
@@ -315,15 +328,29 @@ Examples:
     parser.add_argument("--fps", type=int, default=DEFAULT_FPS, help=f"Target FPS (default: {DEFAULT_FPS})")
     parser.add_argument("--quality", "-q", type=int, default=DEFAULT_QUALITY,
                         help=f"JPEG quality 1-31, lower=better (default: {DEFAULT_QUALITY})")
-    parser.add_argument("--width", type=int, default=DEFAULT_WIDTH, help=f"Output width (default: {DEFAULT_WIDTH})")
-    parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT, help=f"Output height (default: {DEFAULT_HEIGHT})")
-    parser.add_argument("--audio-rate", type=int, default=DEFAULT_AUDIO_RATE,
-                        help=f"Audio sample rate (default: {DEFAULT_AUDIO_RATE})")
+    parser.add_argument("--board", "-b", choices=sorted(BOARD_RESOLUTIONS),
+                        help=f"Target board, sets the resolution (default: {DEFAULT_BOARD})")
+    parser.add_argument("--width", type=int, help="Override output width (default: from --board)")
+    parser.add_argument("--height", type=int, help="Override output height (default: from --board)")
     parser.add_argument("--dry-run", "-n", action="store_true", help="Scan and estimate only, don't convert")
     parser.add_argument("--shuffle", action="store_true", help="Shuffle output filenames")
     parser.add_argument("--start-index", type=int, default=0, help="Starting index for unnamed episodes")
 
     args = parser.parse_args()
+
+    if args.board is None and args.width is None and args.height is None:
+        print(f"WARNING: no --board given, assuming '{DEFAULT_BOARD}' "
+              f"({BOARD_RESOLUTIONS[DEFAULT_BOARD][0]}x{BOARD_RESOLUTIONS[DEFAULT_BOARD][1]}). "
+              "Use --board waveshare for 240x240 boards.")
+    board_w, board_h = BOARD_RESOLUTIONS[args.board or DEFAULT_BOARD]
+    args.width = args.width or board_w
+    args.height = args.height or board_h
+    if (args.width, args.height) not in BOARD_RESOLUTIONS.values():
+        print(f"WARNING: {args.width}x{args.height} does not match any board display; "
+              "the firmware will crop the picture.")
+    if args.fps > 15:
+        print(f"WARNING: --fps {args.fps} is above what the decoder sustains (~15-18); "
+              "video may lag behind audio.")
 
     # Check ffmpeg
     try:
@@ -349,7 +376,7 @@ Examples:
             print(f"ERROR: No video files found in {args.input}")
             sys.exit(1)
 
-    print(f"\CoreM5S3 TV Episode Converter")
+    print(f"\nCoreM5S3 TV Episode Converter")
     print(f"{'='*60}")
     print(f"Found {len(files)} video file(s)")
     print(f"Output: {args.output}")
@@ -367,7 +394,6 @@ Examples:
             quality=args.quality,
             width=args.width,
             height=args.height,
-            audio_rate=args.audio_rate,
             index=args.start_index + i,
             dry_run=args.dry_run,
         )
@@ -382,7 +408,7 @@ Examples:
     print(f"{'='*60}\n")
     print("Next steps:")
     print(f"  1. Copy all .mjpeg and .pcm files to the root of a FAT32 microSD card")
-    print(f"  2. Insert SD card into M5Stack CoreS3 SE")
+    print(f"  2. Insert SD card into the board")
     print(f"  3. Power on - the TV will start playing automatically!")
     print()
 

@@ -14,6 +14,8 @@
 #endif
 
 // ── Video ──
+// Default FPS for legacy .mjpeg files without header; files with the
+// "CMTV" header carry their own FPS (see VideoPlayer::openFile).
 #define VIDEO_FPS 15
 #define VIDEO_QUALITY 8
 #define MJPEG_EXT ".mjpeg"
@@ -63,6 +65,8 @@
 #define BTN_BOOT 0
 #define BTN_PWR 5
 #define BTN_PLUS 4
+#define BTN_DEBOUNCE_MS 50
+#define PWR_LONG_PRESS_MS 3000   // Hold PWR this long to power off
 #endif
 
 // ── Touch (CST816S) ──
@@ -92,7 +96,9 @@
 
 // ── TV UI ──
 #define CHANNEL_OSD_MS 2000
-#define STATIC_TRANSITION_MS 1000
+#define STATIC_TRANSITION_MS 1000   // Static at boot, before the first episode
+#define EPISODE_STATIC_MS 1500      // Static between episodes
+#define CHANNEL_STATIC_MS 800       // Static on manual channel change
 
 // ── CRT Off Animation ──
 #define CRT_OFF_ANIM_MS 700

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <atomic>
 #include "config.h"
 #include "audio_hal.h"
 
@@ -20,7 +21,7 @@ public:
 
 private:
   File _file;
-  bool _playing;
+  std::atomic<bool> _playing;  // Read from both cores
   int16_t _buf0[AUDIO_READ_SIZE / 2];
   int16_t _buf1[AUDIO_READ_SIZE / 2];
   int16_t* _playPtr;

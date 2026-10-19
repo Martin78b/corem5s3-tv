@@ -37,6 +37,7 @@ bool AudioPlayer::playFile(const char* path) {
   } else {
     _fillPtr = nullptr;
     _fillSamples = 0;
+    _file.close();
   }
 
   _playing = true;
@@ -57,11 +58,12 @@ bool AudioPlayer::needsFill() {
   return true;
 }
 
+// No SD access here (the caller does not hold the SD mutex): at EOF the file
+// was already closed by fillNext() or playFile().
 void AudioPlayer::playFilled() {
   if (!_fillPtr) {
     _playing = false;
     SPEAKER_OBJ.stop(0);
-    _file.close();
     return;
   }
   _playPtr = _fillPtr;
@@ -71,6 +73,7 @@ void AudioPlayer::playFilled() {
 }
 
 void AudioPlayer::fillNext() {
+  if (!_playing || !_file) return;
   int16_t* nextBuf = (_playIdx == 0) ? _buf0 : _buf1;
   size_t br = _file.read((uint8_t*)nextBuf, AUDIO_READ_SIZE);
   if (br > 0) {
@@ -84,9 +87,10 @@ void AudioPlayer::fillNext() {
   }
 }
 
+// Called from both cores. Does not check _file: it is only open while
+// _playing is true, and reading it here would race with fillNext() closing it.
 bool AudioPlayer::isPlaying() {
   if (_playing) return true;
-  if (_file) return true;
   if (SPEAKER_OBJ.isPlaying(0)) return true;
   return false;
 }

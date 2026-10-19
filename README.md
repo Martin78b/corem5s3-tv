@@ -21,8 +21,8 @@ Turn your ESP32-S3-based board into a standalone retro TV that plays episodes wi
 ## Quick Start
 
 ```bash
-# 1. Convert episodes (for Waveshare use --width 240 --height 240)
-python3 tools/convert_episodes.py --input ~/Videos/Simpsons --output /Volumes/SDCARD --width 240 --height 240
+# 1. Convert episodes (--board sets the resolution: waveshare/generic = 240×240, m5stack = 320×240)
+python3 tools/convert_episodes.py --input ~/Videos/Simpsons --output /Volumes/SDCARD --board waveshare
 
 # 2. Build and flash firmware (select your board)
 cd firmware
@@ -42,14 +42,25 @@ Video file (.mp4/.mkv)
          └── ffmpeg ──► .pcm (raw 16-bit mono PCM audio)
                                   │
 SD Card ──► ESP32-S3 ──► MJPEG decode (JPEGDEC lib)
-                            ├── Apply CRT effects (scanlines, noise)
                             ├── Push to display @ 240×240 or 320×240 (SPI)
                             └── Audio sync via I2S → speaker
 ```
 
 ### File Format
 
-**`.mjpeg`** — Custom format: `[4-byte frame size][JPEG data]...` repeated. No header, no index — just sequential frames until EOF.
+**`.mjpeg`** — Custom format: a 16-byte header followed by `[4-byte frame size][JPEG data]...` repeated (odd-sized frames are padded to an even size). No index — just sequential frames until EOF.
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 4 | Magic `CMTV` |
+| 4 | 1 | Header version (`1`) |
+| 5 | 1 | Reserved (`0`) |
+| 6 | 2 | FPS |
+| 8 | 2 | Width |
+| 10 | 2 | Height |
+| 12 | 4 | PCM sample rate (Hz) |
+
+All fields are little-endian. The firmware paces playback with the FPS from the header, warns (and crops) if the size doesn't match the display, and refuses the audio if the sample rate isn't 44,100 Hz. Files converted before the header existed still play, assuming 15 FPS.
 
 **`.pcm`** — Raw PCM: 44,100 Hz, 16-bit signed, mono, little-endian. No header.
 
@@ -109,18 +120,20 @@ No SD card? The display shows "NO SD CARD". No `.mjpeg` files? It shows "NO .mjp
 ### Behavior
 
 - **Power on** → Boot animation → TV static → Episode starts
-- **Between episodes** → TV static for 2 seconds → next episode
+- **Between episodes** → TV static for 1.5 seconds → next episode
 - **Channel OSD** → "CH XX" in top-right corner for 2 seconds per episode
 - **Episode order** → Random shuffle on each boot
 - **Loop** → Plays continuously until power-off
-- **Previous episode** → Touch left side or press - button (Waveshare)
-- **Power off** → Hold PWR button 3 seconds → CRT off animation → deep sleep
+- **Next / previous episode** → Brief TV static, then the new channel
+  - M5Stack: tap the right / left half of the screen
+  - Waveshare: press BOOT (next) / + (previous)
+- **Power off** (Waveshare) → Hold PWR button 3 seconds → CRT off animation → deep sleep
 
 ### Gesture Controls (Waveshare)
 
 - **Vertical swipe** → Volume up/down with OSD indicator
 - **Horizontal swipe** → Brightness up/down with OSD indicator
-- **Tap** → Previous episode
+- **Tap** → No action (use the buttons to change channel)
 
 ### Battery Monitoring (Waveshare)
 
@@ -130,8 +143,6 @@ No SD card? The display shows "NO SD CARD". No `.mjpeg` files? It shows "NO .mjp
 
 ### CRT Effects
 
-- **Scanlines**: Every other row dimmed by 25% — classic CRT look
-- **Noise**: Random pixel noise at low opacity
 - **TV Static**: Full random grayscale between episodes
 - **Power-off animation**: CRT-style collapse effect (700ms)
 
@@ -171,9 +182,9 @@ The tool automatically extracts season/episode numbers from filenames:
 | `--output` / `-o` | `./output` | Output directory |
 | `--fps` | 15 | Target frames per second |
 | `--quality` / `-q` | 8 | JPEG quality (1–31, lower = better quality, larger files) |
-| `--width` | 320 | Output width in pixels |
-| `--height` | 240 | Output height in pixels |
-| `--audio-rate` | 44100 | Audio sample rate in Hz |
+| `--board` / `-b` | `m5stack` | Target board: `m5stack` (320×240), `waveshare` / `generic` (240×240) |
+| `--width` | from `--board` | Override output width in pixels |
+| `--height` | from `--board` | Override output height in pixels |
 | `--dry-run` / `-n` | false | Estimate only, don't convert |
 | `--start-index` | 0 | Starting index for unnamed files |
 
@@ -181,10 +192,10 @@ The tool automatically extracts season/episode numbers from filenames:
 
 The most important parameters for playback quality vs. storage:
 
-- **FPS**: 15 is the target. The decoder sustains ~16–18 FPS.
+- **FPS**: 15 is the target. The decoder sustains ~16–18 FPS. The FPS is stored in the file header, so the firmware follows whatever you convert with.
 - **Quality**: 8 is a good balance. 5 is near-transparent (larger files). 12+ starts to show artifacts.
-- **Resolution**: 320×240 for M5Stack, 240×240 for Waveshare. Don't change unless you're sure.
-- **Audio rate**: 44100 Hz gives good fidelity. 22050 Hz saves ~50% audio space.
+- **Resolution**: pick it with `--board`. A mismatched file is cropped on the device.
+- **Audio rate**: fixed at 44,100 Hz, the rate the firmware clocks I2S and the DAC at.
 
 ## Project Structure
 
@@ -201,7 +212,7 @@ CoreM5S3-TV/
 │       ├── audio_player.h/.cpp    # I2S audio playback
 │       ├── audio_hal.h            # Hardware abstraction layer
 │       ├── display_hal.h          # Display abstraction layer
-│       ├── crt_effects.h/.cpp     # Scanlines, noise, static, power-off
+│       ├── crt_effects.h/.cpp     # TV static generator
 │       ├── backlight.h/.cpp       # PWM backlight control
 │       ├── battery_monitor.h      # Battery voltage/percentage monitoring
 │       ├── gesture_control.h/.cpp # Touch gesture volume/brightness
@@ -274,13 +285,13 @@ Internal SRAM (512 KB):
 - Check file extensions are lowercase `.mjpeg`
 
 **Video stuttering:**
-- Lower FPS to 15 in config.h or conversion settings
+- Re-convert with `--fps 15` (or lower)
 - Increase JPEG quality value (e.g., 10 → 12 = smaller frames)
 - Use a faster SD card (Class 10 / U1)
 
 **No audio:**
 - Audio must be in a separate `.pcm` file with matching base name
-- Check audio is 22050 Hz, 16-bit, mono
+- Check audio is 44,100 Hz, 16-bit, mono (the converter does this for you)
 - Hardware may need the I2S pins verified (see config.h)
 
 **Audio quality issues (Waveshare):**

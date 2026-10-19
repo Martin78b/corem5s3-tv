@@ -3,7 +3,7 @@
 uint16_t* VideoPlayer::_drawTarget = nullptr;
 
 VideoPlayer::VideoPlayer()
-  : _frameCount(0), _currentFrame(0), _fps(VIDEO_FPS),
+  : _frameCount(0), _currentFrame(0), _fps(VIDEO_FPS), _sampleRate(AUDIO_SAMPLE_RATE),
     _jpegBuf(nullptr), _jpegBufSize(0), _currentFrameSize(0) {}
 
 bool VideoPlayer::begin() {
@@ -26,8 +26,45 @@ bool VideoPlayer::openFile(const char* path) {
   }
   _currentFrame = 0;
   _frameCount = _file.size() / 50;
-  log_i("Opened %s (%u bytes, ~%d frames)", path, _file.size(), _frameCount);
+  readHeader();
+  log_i("Opened %s (%u bytes, ~%d frames, %u fps, %u Hz)", path, _file.size(),
+        _frameCount, _fps, _sampleRate);
   return true;
+}
+
+// Optional 16-byte header written by tools/convert_episodes.py (little-endian):
+//   "CMTV" | u8 version=1 | u8 reserved | u16 fps | u16 width | u16 height | u32 sample_rate
+// Legacy files start directly with a frame size; "CMTV" read as a size is far
+// larger than any valid frame, so both formats can be told apart.
+void VideoPlayer::readHeader() {
+  _fps = VIDEO_FPS;
+  _sampleRate = AUDIO_SAMPLE_RATE;
+
+  uint8_t hdr[16];
+  if (_file.read(hdr, sizeof(hdr)) != sizeof(hdr) || memcmp(hdr, "CMTV", 4) != 0) {
+    _file.seek(0);  // Legacy file: no header
+    return;
+  }
+  if (hdr[4] != 1) {
+    log_w("Unknown header version %u, using defaults", hdr[4]);
+    return;
+  }
+
+  uint16_t fps = hdr[6] | (hdr[7] << 8);
+  uint16_t w = hdr[8] | (hdr[9] << 8);
+  uint16_t h = hdr[10] | (hdr[11] << 8);
+  uint32_t rate = hdr[12] | (hdr[13] << 8) | (hdr[14] << 16) | ((uint32_t)hdr[15] << 24);
+
+  if (fps >= 1 && fps <= 60) {
+    _fps = fps;
+  } else {
+    log_w("Bad FPS %u in header, using %d", fps, VIDEO_FPS);
+  }
+  if (rate > 0) _sampleRate = rate;
+  if (w != DISPLAY_WIDTH || h != DISPLAY_HEIGHT) {
+    log_w("Video is %ux%u but display is %dx%d (will be cropped)", w, h,
+          DISPLAY_WIDTH, DISPLAY_HEIGHT);
+  }
 }
 
 uint32_t VideoPlayer::readNextFrame() {
@@ -83,14 +120,21 @@ float VideoPlayer::frameTimeMs() { return 1000.0f / _fps; }
 
 int VideoPlayer::JPEGDraw(JPEGDRAW* draw) {
   if (!_drawTarget) return 0;
+  // Clip to the framebuffer: a frame larger than the display (e.g. 320x240
+  // on a 240x240 board) would otherwise write past the end of it.
+  if (draw->x >= DISPLAY_WIDTH || draw->y >= DISPLAY_HEIGHT) return 1;
+  int w = draw->iWidth;
+  int h = draw->iHeight;
+  if (draw->x + w > DISPLAY_WIDTH) w = DISPLAY_WIDTH - draw->x;
+  if (draw->y + h > DISPLAY_HEIGHT) h = DISPLAY_HEIGHT - draw->y;
+
   uint16_t* dst = _drawTarget + draw->y * DISPLAY_WIDTH + draw->x;
   uint16_t* src = (uint16_t*)draw->pPixels;
-  int w = draw->iWidth;
 
-  for (int row = 0; row < draw->iHeight; row++) {
+  for (int row = 0; row < h; row++) {
     memcpy(dst, src, w * 2);
     dst += DISPLAY_WIDTH;
-    src += w;
+    src += draw->iWidth;
   }
   return 1;
 }
