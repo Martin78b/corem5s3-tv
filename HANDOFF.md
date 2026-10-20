@@ -63,15 +63,18 @@ Antes de aplicar un ítem, verificar que las líneas citadas siguen siendo las m
 
 ## R — Robustez
 
-- [ ] **R1.** `GESTURE_DEBUG 1` por defecto (`config.h:106`) → `Serial.printf` en cada lectura táctil
+- [x] **R1.** `GESTURE_DEBUG 1` por defecto (`config.h:106`) → `Serial.printf` en cada lectura táctil
   (cada 5–30 ms) aunque no haya dedo (`main.cpp:597`). Poner `0` para release.
-- [ ] **R2. Batería** (`firmware/src/battery_monitor.h`):
+  ✅ Aplicado (2026-10-19): `GESTURE_DEBUG 0`.
+- [x] **R2. Batería** (`firmware/src/battery_monitor.h`):
   - Usar `analogReadMilliVolts()` (calibrado eFuse) y promediar 8–16 muestras.
   - Sustituir la curva lineal 3.0–4.2 V por una tabla LiPo de 5–6 puntos.
   - Reiniciar `s_lowBatteryWarned` al cargar (`main.cpp:505`).
   - Quitar el `delay(2000)` del aviso de batería baja (`main.cpp:511`); mostrarlo como OSD temporal.
-- [ ] **R3. Descarte de frames**: si el video va atrasado más de 1–2 frames respecto al audio,
+  ✅ Aplicado (2026-10-19): `analogReadMilliVolts()` promediando 16 muestras; tabla LiPo de 7 puntos (3.3 V = 0 %, 4.2 V = 100 %) interpolada; `s_lowBatteryWarned` se rearma al cargar; el aviso es un OSD de 3 s (`LOW_BATTERY_OSD_MS`) sin `delay` ni estática.
+- [x] **R3. Descarte de frames**: si el video va atrasado más de 1–2 frames respecto al audio,
   leer el frame sin decodificar (`main.cpp:454-472`).
+  ✅ Aplicado (2026-10-19): si el video va más de `VIDEO_MAX_LAG_FRAMES` (2) atrás del audio, se leen y descartan frames sin decodificar, como máximo `VIDEO_MAX_SKIP_PER_LOOP` (8) por vuelta.
 - [ ] **R4. Offset de sincronía**: `totalSamples()` cuenta muestras encoladas, no reproducidas →
   video adelantado ~90–180 ms. Restar la latencia de DMA + chunk.
 - [ ] **R5. Overflow de `millis()`**: comparaciones como `nowMs < s_channelOsdEnd` (`main.cpp:486, 492`,
@@ -99,9 +102,11 @@ Antes de aplicar un ítem, verificar que las líneas citadas siguen siendo las m
 
 ## L — Limpieza del repo
 
-- [ ] **L1.** Borrar o mover a `docs/reference/`: `scratch_bsp_config.h`, `scratch_es8311.c`,
+- [x] **L1.** Borrar o mover a `docs/reference/`: `scratch_bsp_config.h`, `scratch_es8311.c`,
   `scratch_esp32_s3_touch_lcd_1_54.c`, `scratch_esp32_s3_touch_lcd_1_54.h`.
-- [ ] **L2.** Borrar `firmware/boards/m5stack-cores3.json.bak` y `firmware/boards/tft_waveshare_154.h` (no se usa).
+  ✅ Aplicado (2026-10-19): movidos a `docs/reference/` (F3.1 cita uno de ellos).
+- [x] **L2.** Borrar `firmware/boards/m5stack-cores3.json.bak` y `firmware/boards/tft_waveshare_154.h` (no se usa).
+  ✅ Aplicado (2026-10-19): ambos borrados.
 - [ ] **L3.** Código muerto: `i2c_scan()`, `triggerVolumeStep/BrightnessStep`, `getPlaybackTimeUs`,
   `applyCurvature`, `dimColor`, `randomColor`, `totalFrames`, `drawString` comentados,
   `#include "config.h"` duplicado (`main.cpp:1` y `:12`).
@@ -230,7 +235,7 @@ CONFIGURACIÓN
 
 - [ ] **F3.1 Verificar hardware primero**:
   - Waveshare: `HARDWARE_REFERENCE.md` dice que hay un QMI8658 en I2C `0x6B` (bus compartido SDA42/SCL41),
-    pero `scratch_esp32_s3_touch_lcd_1_54.h:61` dice `BSP_CAPS_IMU 0`. Confirmar llamando a
+    pero `docs/reference/scratch_esp32_s3_touch_lcd_1_54.h:61` dice `BSP_CAPS_IMU 0`. Confirmar llamando a
     `i2c_scan()` (ya existe en `main.cpp`) y leyendo el WHO_AM_I del QMI8658.
   - M5 CoreS3 **SE**: probablemente **no** tiene IMU (la CoreS3 normal sí, una BMI270 vía `M5.Imu`).
     Confirmar. Si no hay IMU, solo rotación manual desde el menú.

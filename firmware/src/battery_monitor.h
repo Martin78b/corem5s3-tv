@@ -47,24 +47,15 @@ public:
     _state.charging   = M5.Power.isCharging();
     _state.valid      = true;
 #elif defined(WAVESHARE_154)
-    int raw = analogRead(BAT_ADC_PIN);
-    if (raw < 0) {
-      _state.valid = false;
-      return _state;
+    // eFuse-calibrated reading, averaged to smooth out ADC noise
+    uint32_t v_pin_mv = 0;
+    for (int i = 0; i < BAT_ADC_SAMPLES; i++) {
+      v_pin_mv += analogReadMilliVolts(BAT_ADC_PIN);
     }
-    // Voltage at pin: raw/4095 * 3.3V
+    v_pin_mv /= BAT_ADC_SAMPLES;
     // Actual battery: pin_voltage * (200k+100k)/100k = pin_voltage * 3
-    uint32_t v_pin_mv = (raw * 3300) / 4095;
     _state.voltage_mv = v_pin_mv * 3;
-
-    // LiPo percentage (3.0V=0%, 4.2V=100%)
-    if (_state.voltage_mv >= 4200) {
-      _state.percentage = 100;
-    } else if (_state.voltage_mv <= 3000) {
-      _state.percentage = 0;
-    } else {
-      _state.percentage = (_state.voltage_mv - 3000) / 12;
-    }
+    _state.percentage = lipoPercent(_state.voltage_mv);
 
     _state.charging = (digitalRead(BAT_CHG_STAT) == LOW);
     _state.valid    = true;
@@ -78,6 +69,29 @@ public:
   static const State& getState() { return _state; }
 
 private:
+#ifdef WAVESHARE_154
+  static constexpr int BAT_ADC_SAMPLES = 16;
+
+  // Single-cell LiPo discharge curve (approximate), linearly interpolated.
+  static uint8_t lipoPercent(uint16_t mv) {
+    static const struct { uint16_t mv; uint8_t pct; } curve[] = {
+      {4200, 100}, {4050, 85}, {3900, 65}, {3750, 40},
+      {3650, 20},  {3500, 5},  {3300, 0},
+    };
+    const int n = sizeof(curve) / sizeof(curve[0]);
+    if (mv >= curve[0].mv) return 100;
+    if (mv <= curve[n - 1].mv) return 0;
+    for (int i = 1; i < n; i++) {
+      if (mv >= curve[i].mv) {
+        uint16_t dv = curve[i - 1].mv - curve[i].mv;
+        uint8_t dp = curve[i - 1].pct - curve[i].pct;
+        return curve[i].pct + (uint32_t)(mv - curve[i].mv) * dp / dv;
+      }
+    }
+    return 0;
+  }
+#endif
+
   static inline State _state = {};
   static inline uint32_t _lastReadMs = 0;
 };

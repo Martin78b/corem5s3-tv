@@ -53,6 +53,7 @@ static uint32_t s_audioFinishedAt = 0;
 static bool s_audioEndHandled = false;
 static bool s_lowBatteryWarned = false;
 static uint32_t s_batteryOsdEnd = 0;
+static uint32_t s_lowBatteryOsdEnd = 0;
 
 #ifdef WAVESHARE_154
 static GestureController s_gesture;
@@ -457,8 +458,9 @@ void loop() {
   }
 
   // Frame pacing - driven by audio progress to prevent A/V drift
-  uint64_t audioSamples = s_audio.totalSamples();
-  if (audioSamples * s_video.fps() < (uint64_t)s_nextFrameToShow * AUDIO_SAMPLE_RATE) {
+  uint32_t audioFrame =
+      (uint64_t)s_audio.totalSamples() * s_video.fps() / AUDIO_SAMPLE_RATE;
+  if (audioFrame < s_nextFrameToShow) {
     delay(1);
     return;
   }
@@ -469,6 +471,14 @@ void loop() {
     bool got = xSemaphoreTake(s_sdMutex, pdMS_TO_TICKS(50)) == pdTRUE;
     if (got) {
       uint32_t fs = s_video.readNextFrame();
+      // Video behind audio: discard frames (read, no decode) to catch up.
+      for (int skipped = 0;
+           fs > 0 && skipped < VIDEO_MAX_SKIP_PER_LOOP &&
+           audioFrame > s_nextFrameToShow + VIDEO_MAX_LAG_FRAMES;
+           skipped++) {
+        s_nextFrameToShow++;
+        fs = s_video.readNextFrame();
+      }
       xSemaphoreGive(s_sdMutex);
       if (fs > 0) {
         decoded = s_video.decodeFrame(s_framebuffer);
@@ -503,14 +513,18 @@ void loop() {
   s_gesture.renderOSD();
 #endif
 
-  // Low battery warning
-  if (bat.valid && bat.percentage <= 10 && !s_lowBatteryWarned) {
+  // Low battery warning: once per discharge, re-armed when charging.
+  // Drawn over the video for a few seconds instead of blocking playback.
+  if (bat.valid && bat.charging) {
+    s_lowBatteryWarned = false;
+  } else if (bat.valid && bat.percentage <= 10 && !s_lowBatteryWarned) {
     s_lowBatteryWarned = true;
-    showTVStatic(500);
+    s_lowBatteryOsdEnd = nowMs + LOW_BATTERY_OSD_MS;
+  }
+  if (nowMs < s_lowBatteryOsdEnd) {
     Display.setTextSize(2);
     Display.setTextColor(TFT_RED, TFT_BLACK);
     Display.drawString("LOW BATTERY", 30, 100);
-    delay(2000);
   }
 }
 

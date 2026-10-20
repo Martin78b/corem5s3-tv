@@ -18,6 +18,10 @@
 // "CMTV" header carry their own FPS (see VideoPlayer::openFile).
 #define VIDEO_FPS 15
 #define VIDEO_QUALITY 8
+// If video falls more than this many frames behind audio, frames are read
+// and discarded (not decoded) until it catches up.
+#define VIDEO_MAX_LAG_FRAMES 2
+#define VIDEO_MAX_SKIP_PER_LOOP 8   // Cap per loop() so the SD mutex is not held too long
 #define MJPEG_EXT ".mjpeg"
 #define PCM_EXT ".pcm"
 
@@ -96,6 +100,7 @@
 
 // ── TV UI ──
 #define CHANNEL_OSD_MS 2000
+#define LOW_BATTERY_OSD_MS 3000
 #define STATIC_TRANSITION_MS 1000   // Static at boot, before the first episode
 #define EPISODE_STATIC_MS 1500      // Static between episodes
 #define CHANNEL_STATIC_MS 800       // Static on manual channel change
@@ -109,4 +114,4 @@
 
 // ── Gesture Debug ──
 // Set to 1 to enable detailed gesture logging (may affect playback performance)
-#define GESTURE_DEBUG 1
+#define GESTURE_DEBUG 0

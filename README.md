@@ -138,7 +138,7 @@ No SD card? The display shows "NO SD CARD". No `.mjpeg` files? It shows "NO .mjp
 ### Battery Monitoring (Waveshare)
 
 - Shows battery level OSD at episode start
-- Low battery warning at 10% with persistent OSD
+- Low battery warning at 10% (3 s on-screen message, re-armed after charging); level OSD stays visible below 20%
 - Monitors charge status via GPIO
 
 ### CRT Effects
@@ -310,9 +310,9 @@ Internal SRAM (512 KB):
 **Battery OSD not showing:**
 - Battery monitoring only works on Waveshare with hardware
 - Check BAT_ADC (GPIO1) and BAT_CHG_STAT (GPIO3) connections
-- Battery percentage uses LiPo curve (3.0V=0%, 4.2V=100%)
+- Battery percentage uses an approximate LiPo discharge table (3.3 V = 0%, 4.2 V = 100%), averaged over 16 calibrated ADC samples
 
 **Gesture controls not working:**
 - Ensure touch is working first (see above)
-- Check GESTURE_DEBUG in config.h for detailed logging
+- Set GESTURE_DEBUG to 1 in config.h for detailed logging (off by default: it logs every touch read)
 - Minimum swipe distance is 15px, tap duration 300ms
