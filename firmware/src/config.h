@@ -124,6 +124,16 @@
 #define EPISODE_STATIC_MS 1500      // Static between episodes
 #define CHANNEL_STATIC_MS 800       // Static on manual channel change
 
+// ── Firmware info (shown under the boot logo) ──
+// FW_VERSION / FW_GIT_HASH can be injected with -D at build time (HANDOFF F7.2)
+#ifndef FW_VERSION
+#define FW_VERSION "dev"
+#endif
+#ifndef FW_GIT_HASH
+#define FW_GIT_HASH ""
+#endif
+#define FW_REPO_URL "github.com/Martin78b/corem5s3-tv"
+
 // ── CRT Off Animation ──
 #define CRT_OFF_ANIM_MS 700
 

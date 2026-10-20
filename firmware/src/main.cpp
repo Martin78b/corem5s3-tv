@@ -922,6 +922,20 @@ static void showBootAnimation() {
   Display.setAddrWindow(0, 0, LOGO_W, LOGO_H);
   displayWritePixels((uint16_t *)LOGO_DATA, LOGO_W * LOGO_H);
   Display.endWrite();
+
+  // Version + repo URL in the black band under the logo (rows 214-239)
+  char version[48];
+  if (FW_GIT_HASH[0]) {
+    snprintf(version, sizeof(version), "%s (%s)", FW_VERSION, FW_GIT_HASH);
+  } else {
+    snprintf(version, sizeof(version), "%s", FW_VERSION);
+  }
+  Display.setTextSize(1);
+  Display.setTextColor(Display.color565(0, 150, 60), TFT_BLACK);
+  Display.setTextDatum(TC_DATUM);
+  Display.drawString(version, LOGO_W / 2, 218);
+  Display.drawString(FW_REPO_URL, LOGO_W / 2, 229);
+  Display.setTextDatum(TL_DATUM);
   delay(1500);
 }
 

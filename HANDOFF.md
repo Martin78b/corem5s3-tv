@@ -332,7 +332,7 @@ El USB será **compuesto** (CDC para logs/flasheo + MSC).
 El logo (`logo_240.h` y `logo_320.h`, ambos de 240 px de alto) **ya incluye el nombre** "corem5s3-tv" dibujado en la imagen.
 Hay una franja negra libre en las **filas 212–239 (28 px)** en ambos logos → caben 2 líneas de fuente 1 (8 px).
 
-- [ ] **F7.1 Texto** (centrado, fuente 1, gris o verde tenue para no competir con el logo):
+- [x] **F7.1 Texto** (centrado, fuente 1, gris o verde tenue para no competir con el logo):
   ```
           v0.3.0 · 7947d0a
    github.com/Martin78b/corem5s3-tv
@@ -340,6 +340,7 @@ Hay una franja negra libre en las **filas 212–239 (28 px)** en ambos logos →
   Posición aproximada: línea 1 en y≈216, línea 2 en y≈228. La URL tiene 32 caracteres ≈ 192 px, así que entra en 240 px.
   Dibujar con `setTextDatum(TC_DATUM)` (o calcular `textWidth`) en `showBootAnimation()` (`main.cpp:773-778`),
   justo después de pintar el logo y antes del `delay(1500)`.
+  ✅ Aplicado (2026-10-19): dos líneas en verde tenue, centradas en `LOGO_W/2`, en y=218 y y=229. Verificado: la franja negra empieza en la fila 214 en ambos logos, no en la 212. Hasta hacer F7.2, `FW_VERSION` vale `"dev"` y `FW_GIT_HASH` está vacío, ambos con `#ifndef` en `config.h`, así que solo se ve "dev". Se usó `v0.3.0 (hash)` en lugar de "·", porque la fuente GLCD no tiene ese carácter de forma fiable.
 - [ ] **F7.2 Versión automática** (opción C: semver por tag + hash de git):
   - Script `firmware/scripts/version.py` con `extra_scripts = pre:scripts/version.py` en **los tres** entornos de `platformio.ini`.
   - Ejecuta `git describe --tags --always --dirty` y define `-DFW_VERSION=\"...\"` y `-DFW_GIT_HASH=\"...\"`.
