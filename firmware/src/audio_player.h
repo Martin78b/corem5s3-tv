@@ -11,6 +11,12 @@ public:
   bool begin();
   bool playFile(const char* path);
   void stop();
+  // Pause keeps the file and position. What is still queued in the DMA ring
+  // is dropped (< 100 ms), but playedSamples() stays consistent, so video
+  // stays in sync after resume(). Call with the audio mutex held.
+  void pause();
+  void resume();
+  bool isPaused() const { return _paused; }
   bool needsFill();
   void playFilled();
   void fillNext();
@@ -24,6 +30,7 @@ public:
 private:
   File _file;
   std::atomic<bool> _playing;  // Read from both cores
+  std::atomic<bool> _paused;
   int16_t _buf0[AUDIO_READ_SIZE / 2];
   int16_t _buf1[AUDIO_READ_SIZE / 2];
   int16_t* _playPtr;

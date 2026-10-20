@@ -112,7 +112,8 @@
 #endif
 
 // ── Episode Playback ──
-#define MAX_EPISODES 100
+// Static list in internal RAM: ~100 bytes per episode (~25 KB for 250)
+#define MAX_EPISODES 250
 #define EPISODE_PATH_MAX 96   // Longer file names are skipped with a warning
 #define BOOT_DELAY_MS 500
 
@@ -123,6 +124,8 @@
 #define STATIC_TRANSITION_MS 1000   // Static at boot, before the first episode
 #define EPISODE_STATIC_MS 1500      // Static between episodes
 #define CHANNEL_STATIC_MS 800       // Static on manual channel change
+#define MENU_TIMEOUT_MS 10000       // Menu closes after this long without input
+#define SETTINGS_SAVE_DELAY_MS 5000 // Save gesture volume/brightness once they settle
 
 // ── Firmware info (shown under the boot logo) ──
 // FW_VERSION / FW_GIT_HASH can be injected with -D at build time (HANDOFF F7.2)

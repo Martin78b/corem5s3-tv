@@ -18,6 +18,8 @@
 #include "backlight.h"
 #include "es8311.h"
 #include "gesture_control.h"
+#include "menu.h"
+#include "settings.h"
 #include <driver/i2c.h>
 #endif
 
@@ -38,8 +40,16 @@ static int s_episodeCount = 0;
 static int s_currentEpisode = -1;
 static uint16_t *s_framebuffer = nullptr;
 static std::atomic<bool> s_playing{false};  // Read by audioTask (core 0)
-static bool s_staticTransition = false;
-static uint32_t s_staticStart = 0;
+
+// App state machine. Written by loop() (core 1); touchTask (core 0) reads it
+// to decide what gestures mean.
+enum class AppState : uint8_t {
+  STATIC,     // TV static: boot, between episodes, channel change
+  PLAYING,    // Episode playing (or finishing)
+  MENU,       // Settings menu open, playback paused
+  POWER_OFF,  // CRT-off animation, then deep sleep
+};
+static std::atomic<AppState> s_appState{AppState::STATIC};
 static uint32_t s_channelOsdStart = 0;
 static int s_channelNumber = 1;
 static int s_playlist[MAX_EPISODES];
@@ -57,6 +67,11 @@ static uint32_t s_lowBatteryOsdStart = 0;
 
 #ifdef WAVESHARE_154
 static GestureController s_gesture;
+static SettingsMenu s_menu;
+static Settings s_settings;       // Live values (menu edits them in place)
+static Settings s_savedSettings;  // What is in NVS
+// Gestures recognized while the menu is open, from touchTask to loop()
+static QueueHandle_t s_uiQueue = NULL;
 #if GESTURE_DEBUG
 static struct { bool ok; uint8_t finger; int16_t x, y; } s_touchDbg = { false, 0, -1, -1 };
 #endif
@@ -105,17 +120,25 @@ static void showFrameDMA(uint32_t audioFrame);
 #endif
 static void showBootAnimation();
 static void showCRTOffAnimation();
+#ifdef M5STACK
 static void handleTouch();
+#endif
 #ifdef WAVESHARE_154
+static GestureResult readTouch();
+static void openMenu();
+static void closeMenu();
+static void tickMenu(bool pwrShort, bool boot, bool plus);
+static void persistGestureLevels();
 static void i2c_scan();
 #endif
+static void formatVersion(char *buf, size_t len);
 
 static void audioTask(void *arg) {
   while (true) {
     bool active = false;
     if (s_playing &&
         xSemaphoreTake(s_audioMutex, portMAX_DELAY) == pdTRUE) {
-      active = s_audio.isPlaying();
+      active = s_audio.isPlaying() && !s_audio.isPaused();
       if (active && s_audio.needsFill()) {
         // May block on I2S DMA, but touches no SD, so s_sdMutex stays free
         // for the video reader.
@@ -141,6 +164,7 @@ static void touchTask(void *arg) {
   digitalWrite(TOUCH_RST, HIGH);
   delay(100);  // Give CST816T time to boot after reset release
 
+  bool menuMode = false;
   while (true) {
     // La IRQ del CST816 es activa en bajo. Cuando esta pendiente un evento
     // tactil muestreamos rapido para no perder el toque; en reposo, lento.
@@ -149,29 +173,48 @@ static void touchTask(void *arg) {
       lastEventEdge = millis();
     }
     bool keepFast = irqActive || (millis() - lastEventEdge < 200);
-    handleTouch();
+
+    // Menu abierto: los gestos se vuelven eventos para loop() y no tocan
+    // volumen/brillo. Al cambiar de modo se descarta el gesto a medias y se
+    // adoptan los niveles del menu (loop() los escribe antes de cambiar el estado).
+    bool inMenu = (s_appState == AppState::MENU);
+    if (inMenu != menuMode) {
+      menuMode = inMenu;
+      s_gesture.setMenuMode(inMenu, s_settings.volumePct, s_settings.brightnessPct);
+    }
+    GestureResult result = readTouch();
+    if (inMenu && result != GestureResult::NONE) {
+      xQueueSend(s_uiQueue, &result, 0);
+    }
     vTaskDelay(pdMS_TO_TICKS(keepFast ? 5 : 30));
   }
 }
 
 // PWR button (GPIO5): long press = CRT off animation + deep sleep.
-// Used both from loop() and from the error screens in setup().
-static void checkPowerOff() {
+// Returns true on a short press (released before PWR_LONG_PRESS_MS).
+static bool pollPowerButton() {
   static uint32_t pwrPressStart = 0;
   bool btnPressed = (gpio_get_level((gpio_num_t)BTN_PWR) == 0);
+  uint32_t now = millis();
   if (btnPressed) {
     if (pwrPressStart == 0) {
-      pwrPressStart = millis();
-    } else if (millis() - pwrPressStart > PWR_LONG_PRESS_MS) {
+      pwrPressStart = now ? now : 1;
+    } else if (now - pwrPressStart > PWR_LONG_PRESS_MS) {
+      s_appState = AppState::POWER_OFF;
       showCRTOffAnimation();
       digitalWrite(2, LOW);
       delay(100);
       esp_deep_sleep_start();
     }
-  } else {
-    pwrPressStart = 0;
+    return false;
   }
+  bool shortPress = pwrPressStart != 0 && now - pwrPressStart >= BTN_DEBOUNCE_MS;
+  pwrPressStart = 0;
+  return shortPress;
 }
+
+// Used from the error screens in setup(): only power-off matters there.
+static void checkPowerOff() { pollPowerButton(); }
 
 // Non-blocking debounced button: returns true once per press, after the pin
 // has been held LOW for BTN_DEBOUNCE_MS. Resets as soon as it is released.
@@ -378,11 +421,13 @@ void setup() {
   }
 
 #ifdef WAVESHARE_154
+  s_settings = SettingsStore::load();
+  s_savedSettings = s_settings;
   // Init PWM backlight on TFT_BL (GPIO46) - required for brightness swipes
-  Backlight::begin(TFT_BL, 100);
-  // Initialize gesture controller with default volume 90% and brightness 100%
-  s_gesture.begin(&s_audio, 90, 100);
-  s_audio.setVolume(GestureController::pctToHwVolume(90));
+  Backlight::begin(TFT_BL, s_settings.brightnessPct);
+  s_gesture.begin(&s_audio, s_settings.volumePct, s_settings.brightnessPct);
+  s_audio.setVolume(GestureController::pctToHwVolume(s_settings.volumePct));
+  s_uiQueue = xQueueCreate(8, sizeof(GestureResult));
 #endif
 
   s_episodeCount = VideoPlayer::scanEpisodes(s_episodes, MAX_EPISODES);
@@ -418,19 +463,33 @@ void setup() {
 void loop() {
 #ifdef WAVESHARE_154
   {
-    checkPowerOff();
-    // BOOT button (GPIO0): short press = next channel
+    // Poll every input on every pass so their debounce state stays right
     static DebouncedButton bootBtn = {BTN_BOOT, 0, false};
-    if (buttonPressed(bootBtn)) {
+    static DebouncedButton plusBtn = {BTN_PLUS, 0, false};
+    bool pwrShort = pollPowerButton();
+    bool boot = buttonPressed(bootBtn);
+    bool plus = buttonPressed(plusBtn);
+
+    if (s_appState == AppState::MENU) {
+      tickMenu(pwrShort, boot, plus);
+      return;
+    }
+    // PWR short press: open the menu (only while an episode is playing)
+    if (pwrShort && s_playing && s_audio.isPlaying()) {
+      openMenu();
+      return;
+    }
+    // BOOT button (GPIO0): short press = next channel
+    if (boot) {
       showTVStatic(CHANNEL_STATIC_MS);
       nextEpisode();
     }
     // +/Key button (GPIO4): short press = prev channel
-    static DebouncedButton plusBtn = {BTN_PLUS, 0, false};
-    if (buttonPressed(plusBtn)) {
+    if (plus) {
       showTVStatic(CHANNEL_STATIC_MS);
       prevEpisode();
     }
+    persistGestureLevels();
   }
 #endif
 
@@ -440,10 +499,7 @@ void loop() {
 #endif
 
   if (!s_playing) {
-    if (!s_staticTransition) {
-      s_staticTransition = true;
-      s_staticStart = millis();
-    }
+    s_appState = AppState::STATIC;
 
     if (s_audioFinishedAt == 0) {
       s_audioFinishedAt = millis();
@@ -454,7 +510,6 @@ void loop() {
         showTVStatic(EPISODE_STATIC_MS);
         nextEpisode();
         s_audioFinishedAt = 0;
-        s_staticTransition = false;
         s_audioEndHandled = false;
       }
     }
@@ -702,7 +757,7 @@ static bool touchReadBytes(uint8_t reg, uint8_t *buf, size_t len) {
   return ret == ESP_OK;
 }
 
-static void handleTouch() {
+static GestureResult readTouch() {
   // La cadencia de muestreo la controla touchTask (vTaskDelay), que ya se
   // acelera cuando la IRQ del CST816 esta activa.
 
@@ -712,7 +767,7 @@ static void handleTouch() {
 
   uint8_t data[7];
   if (!touchReadBytes(0x00, data, sizeof(data))) {
-    s_gesture.update(0, 0, 0);
+    GestureResult result = s_gesture.update(0, 0, 0);
     static uint32_t s_touchFailCount = 0;
     static uint32_t s_touchFailLogMs = 0;
     s_touchFailCount++;
@@ -720,7 +775,7 @@ static void handleTouch() {
       s_touchFailLogMs = millis();
       Serial.printf("[TOUCH] I2C fail #%u\n", s_touchFailCount);
     }
-    return;
+    return result;
   }
 
   // ── Layout CST816S (equivalente al driver oficial TouchDrvCSTXXX de Waveshare) ──
@@ -740,9 +795,116 @@ static void handleTouch() {
   }
 
   // El estado se deriva solo de FingerNum (data[2]), nunca del GestureID.
-  // Un TAP no hace nada durante la reproduccion: esta tarea corre en core 0 y
-  // no debe llamar a playEpisode() (ver HANDOFF F1.7). Canales: botones.
-  s_gesture.update(fingerCount, lastX, lastY);
+  // Esta tarea corre en core 0: no actua sobre los gestos, solo los devuelve.
+  // Durante la reproduccion un TAP no hace nada (canales: botones).
+  return s_gesture.update(fingerCount, lastX, lastY);
+}
+
+// ── Settings menu (F1) ──
+
+static void menuApplyVolume(uint8_t pct) {
+  s_audio.setVolume(GestureController::pctToHwVolume(pct));
+}
+
+static void menuApplyBrightness(uint8_t pct) { Backlight::setBrightness(pct); }
+
+static void menuFillInfo(SettingsMenu::InfoData &info) {
+  static char version[48];
+  formatVersion(version, sizeof(version));
+  BatteryMonitor::State bat = BatteryMonitor::update();
+  info.version = version;
+  info.episodes = s_episodeCount;
+  info.batteryValid = bat.valid;
+  info.batteryPct = bat.percentage;
+  info.batteryMv = bat.voltage_mv;
+  info.charging = bat.charging;
+}
+
+// Pauses playback and opens the menu over the frozen frame.
+static void openMenu() {
+  s_settings.volumePct = s_gesture.getVolumePct();
+  s_settings.brightnessPct = s_gesture.getBrightnessPct();
+
+  xSemaphoreTake(s_audioMutex, portMAX_DELAY);
+  s_audio.pause();
+  xSemaphoreGive(s_audioMutex);
+
+  xQueueReset(s_uiQueue);
+  s_appState = AppState::MENU;
+  s_menu.open(s_settings, {menuApplyVolume, menuApplyBrightness, menuFillInfo});
+}
+
+// Saves what changed and resumes. The next video frame repaints the screen.
+static void closeMenu() {
+  if (s_settings != s_savedSettings) {
+    SettingsStore::save(s_settings);
+    s_savedSettings = s_settings;
+  }
+  s_appState = AppState::PLAYING;  // touchTask now adopts s_settings levels
+
+  xSemaphoreTake(s_audioMutex, portMAX_DELAY);
+  s_audio.resume();
+  xSemaphoreGive(s_audioMutex);
+}
+
+static void tickMenu(bool pwrShort, bool boot, bool plus) {
+  SettingsMenu::Input input;
+  bool hasInput = true;
+  GestureResult g;
+  if (pwrShort) {
+    input = SettingsMenu::Input::BACK;
+  } else if (boot) {
+    input = SettingsMenu::Input::DOWN;
+  } else if (plus) {
+    input = SettingsMenu::Input::SELECT;
+  } else if (xQueueReceive(s_uiQueue, &g, 0) == pdTRUE) {
+    switch (g) {
+      case GestureResult::SWIPE_UP:    input = SettingsMenu::Input::UP; break;
+      case GestureResult::SWIPE_DOWN:  input = SettingsMenu::Input::DOWN; break;
+      case GestureResult::SWIPE_LEFT:  input = SettingsMenu::Input::LEFT; break;
+      case GestureResult::SWIPE_RIGHT: input = SettingsMenu::Input::RIGHT; break;
+      case GestureResult::TAP:         input = SettingsMenu::Input::SELECT; break;
+      default: hasInput = false; break;
+    }
+  } else {
+    hasInput = false;
+  }
+
+  if (!s_menu.tick(hasInput ? &input : nullptr)) {
+    closeMenu();
+    return;
+  }
+  delay(10);
+}
+
+// Volume/brightness changed by swipes are saved once they stop changing, so
+// a long swipe does not write the flash on every step. Only the gesture's own
+// changes count: right after the menu closes, touchTask adopts the menu's
+// values, which shows up here as a change to the same values.
+static void persistGestureLevels() {
+  static uint8_t lastVol = 255, lastBri = 255;
+  static uint32_t changedMs = 0;
+  static bool pending = false;
+
+  uint8_t vol = s_gesture.getVolumePct();
+  uint8_t bri = s_gesture.getBrightnessPct();
+  if (vol != lastVol || bri != lastBri) {
+    bool first = (lastVol == 255);
+    lastVol = vol;
+    lastBri = bri;
+    if (first) return;  // Initial values, nothing changed yet
+    s_settings.volumePct = vol;
+    s_settings.brightnessPct = bri;
+    changedMs = millis();
+    pending = true;
+  }
+  if (pending && millis() - changedMs >= SETTINGS_SAVE_DELAY_MS) {
+    pending = false;
+    if (s_settings != s_savedSettings) {
+      SettingsStore::save(s_settings);
+      s_savedSettings = s_settings;
+    }
+  }
 }
 #endif
 
@@ -834,7 +996,8 @@ static void playEpisode(int index) {
     return;
 
   const char *videoPath = s_episodes[index].path;
-  const char *audioPath = s_episodes[index].pcmPath;
+  char audioPath[EPISODE_PATH_MAX];
+  VideoPlayer::pcmPath(s_episodes[index], audioPath, sizeof(audioPath));
 
   log_i("Playing episode %d: %s", index, videoPath);
   Display.fillScreen(TFT_BLACK);
@@ -880,6 +1043,7 @@ static void playEpisode(int index) {
   s_nextFrameToShow = 0;
   s_currentEpisode = index;
   s_playing = true;
+  s_appState = AppState::PLAYING;
   s_channelOsdStart = millis();
 #if DISPLAY_DMA
   s_frontReady = false;
@@ -890,6 +1054,7 @@ static void playEpisode(int index) {
 }
 
 static void showTVStatic(uint32_t durationMs) {
+  s_appState = AppState::STATIC;
   uint32_t start = millis();
   uint32_t frameTime = 1000 / 25;
 
@@ -900,6 +1065,15 @@ static void showTVStatic(uint32_t durationMs) {
     displayWritePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
     Display.endWrite();
     delay(frameTime);
+  }
+}
+
+// "v0.3.0 (7947d0a)", or just the version when there is no git hash
+static void formatVersion(char *buf, size_t len) {
+  if (FW_GIT_HASH[0]) {
+    snprintf(buf, len, "%s (%s)", FW_VERSION, FW_GIT_HASH);
+  } else {
+    snprintf(buf, len, "%s", FW_VERSION);
   }
 }
 
@@ -925,11 +1099,7 @@ static void showBootAnimation() {
 
   // Version + repo URL in the black band under the logo (rows 214-239)
   char version[48];
-  if (FW_GIT_HASH[0]) {
-    snprintf(version, sizeof(version), "%s (%s)", FW_VERSION, FW_GIT_HASH);
-  } else {
-    snprintf(version, sizeof(version), "%s", FW_VERSION);
-  }
+  formatVersion(version, sizeof(version));
   Display.setTextSize(1);
   Display.setTextColor(Display.color565(0, 150, 60), TFT_BLACK);
   Display.setTextDatum(TC_DATUM);

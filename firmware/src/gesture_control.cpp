@@ -31,6 +31,7 @@ GestureController::GestureController()
     : _cfg(GESTURE_DEFAULT_CONFIG),
       _state(GestureState::IDLE),
       _audio(nullptr),
+      _menuMode(false),
       _startX(0), _startY(0),
       _lastProcessedX(0), _lastProcessedY(0),
       _startTimeMs(0),
@@ -45,6 +46,16 @@ void GestureController::begin(AudioPlayer* audio, uint8_t initialVolumePct, uint
   _audio = audio;
   _volumePct = initialVolumePct;
   _brightnessPct = initialBrightnessPct;
+}
+
+void GestureController::setMenuMode(bool menu, uint8_t volumePct, uint8_t brightnessPct) {
+  _menuMode = menu;
+  _state = GestureState::IDLE;
+  _volumePct = volumePct;
+  _brightnessPct = brightnessPct;
+  // Hide any volume/brightness OSD left from before the menu
+  _volumeOsdShown = false;
+  _brightnessOsdShown = false;
 }
 
 // ── Main Update ──
@@ -83,6 +94,10 @@ GestureResult GestureController::update(uint8_t fingerCount, int16_t x, int16_t 
             _state = GestureState::SWIPING_V;
             _lastProcessedY = _startY; // Reset so first delta is from start
             GESTURE_LOG("VERTICAL %s", dy < 0 ? "UP" : "DOWN");
+            if (_menuMode) {
+              result = dy < 0 ? GestureResult::SWIPE_UP : GestureResult::SWIPE_DOWN;
+              break;
+            }
             // Apply initial delta
             applyVolumeDelta(_lastProcessedY - y);
             _lastProcessedY = y;
@@ -96,6 +111,10 @@ GestureResult GestureController::update(uint8_t fingerCount, int16_t x, int16_t 
             _state = GestureState::SWIPING_H;
             _lastProcessedX = _startX;
             GESTURE_LOG("HORIZONTAL %s", dx > 0 ? "RIGHT" : "LEFT");
+            if (_menuMode) {
+              result = dx > 0 ? GestureResult::SWIPE_RIGHT : GestureResult::SWIPE_LEFT;
+              break;
+            }
             applyBrightnessDelta(x - _lastProcessedX);
             _lastProcessedX = x;
             break;
@@ -106,6 +125,7 @@ GestureResult GestureController::update(uint8_t fingerCount, int16_t x, int16_t 
 
       case GestureState::SWIPING_V: {
         // Continuous vertical swipe — volume control
+        if (_menuMode) break;  // One event per swipe in the menu
         int deltaY = _lastProcessedY - y; // positive = finger moved up = volume up
         if (abs(deltaY) >= _cfg.process_delta_px) {
           applyVolumeDelta(deltaY);
@@ -116,6 +136,7 @@ GestureResult GestureController::update(uint8_t fingerCount, int16_t x, int16_t 
 
       case GestureState::SWIPING_H: {
         // Continuous horizontal swipe — brightness control
+        if (_menuMode) break;
         int deltaX = x - _lastProcessedX; // positive = finger moved right = brightness up
         if (abs(deltaX) >= _cfg.process_delta_px) {
           applyBrightnessDelta(deltaX);

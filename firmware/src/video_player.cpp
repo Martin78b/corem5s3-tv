@@ -146,20 +146,24 @@ int VideoPlayer::scanEpisodes(VideoFile* episodes, int maxEpisodes) {
   File root = SD_FS.open("/");
   if (!root) return 0;
 
-  while (count < maxEpisodes) {
+  while (true) {
     File entry = root.openNextFile();
     if (!entry) break;
     const char* name = entry.name();
-    if (!entry.isDirectory()) {
+    // Skip macOS AppleDouble files ("._S01E01.mjpeg") created when copying from a Mac
+    if (!entry.isDirectory() && strncmp(name, "._", 2) != 0) {
       size_t len = strlen(name);
       const size_t extLen = sizeof(MJPEG_EXT) - 1;
       if (len > extLen && strcasecmp(name + len - extLen, MJPEG_EXT) == 0) {
+        if (count >= maxEpisodes) {
+          log_w("Episode limit (%d) reached, skipping %s", maxEpisodes, name);
+          entry.close();
+          continue;
+        }
         VideoFile& ep = episodes[count];
-        // "/<base>.mjpeg" and "/<base>.pcm"; skip names that would be truncated
-        int baseLen = (int)(len - extLen);
-        int n1 = snprintf(ep.path, sizeof(ep.path), "/%s", name);
-        int n2 = snprintf(ep.pcmPath, sizeof(ep.pcmPath), "/%.*s%s", baseLen, name, PCM_EXT);
-        if (n1 >= (int)sizeof(ep.path) || n2 >= (int)sizeof(ep.pcmPath)) {
+        // Skip names that would be truncated
+        int n = snprintf(ep.path, sizeof(ep.path), "/%s", name);
+        if (n >= (int)sizeof(ep.path)) {
           log_w("Skipping %s: file name too long (max %d chars)", name, EPISODE_PATH_MAX - 2);
         } else {
           count++;
@@ -179,6 +183,14 @@ int VideoPlayer::scanEpisodes(VideoFile* episodes, int maxEpisodes) {
   return count;
 }
 
+void VideoPlayer::pcmPath(const VideoFile& episode, char* buf, size_t len) {
+  const char* dot = strrchr(episode.path, '.');
+  int baseLen = dot ? (int)(dot - episode.path) : (int)strlen(episode.path);
+  snprintf(buf, len, "%.*s%s", baseLen, episode.path, PCM_EXT);
+}
+
 bool VideoPlayer::hasAudio(const VideoFile& episode) {
-  return SD_FS.exists(episode.pcmPath);
+  char path[EPISODE_PATH_MAX];
+  pcmPath(episode, path, sizeof(path));
+  return SD_FS.exists(path);
 }

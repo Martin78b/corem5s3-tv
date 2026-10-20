@@ -100,6 +100,7 @@ Antes de aplicar un ítem, verificar que las líneas citadas siguen siendo las m
   Usar `Display.initDMA()` + `pushImageDMA()` con doble framebuffer para decodificar N+1 mientras se envía N.
   Solo aplica a TFT_eSPI (Waveshare/genérica); M5Unified tiene su propio mecanismo.
   ✅ Aplicado (2026-10-19), solo Waveshare (`DISPLAY_DMA`, se desactiva con 0): dos `TFT_eSprite` de 240×240 en PSRAM (creados antes de `initDMA()`), decodificados en big-endian. El OSD se dibuja dentro del frame, sin parpadeo. El frame N se envía en bandas de 68 filas (límite de 0x4000 px por DMA de TFT_eSPI) mediante un bounce buffer interno; `JPEGDraw` alimenta la siguiente banda mientras decodifica N+1. El DMA nunca queda en vuelo al salir de `showFrameDMA()`. Genérica: queda bloqueante porque la SD podría compartir el host SPI. M5: sin cambios.
+  ⚠️ 2026-10-19: la compilación usa `dio_qspi` (`board_build.psram_type = opi` no es una opción de PlatformIO), así que la PSRAM octal no se detecta y el camino DMA cae al envío bloqueante. Se probó `board_build.arduino.memory_type = dio_opi` y la placa quedó en **bucle de reinicio tras el logo** → revertido. Pendiente: investigar la configuración correcta de PSRAM (¿`qio_opi`? ¿flash real de 16 MB?) con el log serie del crash.
 - [x] **P2. Audio mono** (`firmware/src/audio_hal.h:56-79`): evitar duplicar a estéreo
   (`I2S_CHANNEL_FMT_ONLY_LEFT` o mono en el ES8311) y mover el volumen al DAC (reg 0x32) o usar
   curva logarítmica en vez de `*v/255` lineal.
@@ -166,25 +167,32 @@ F1 conviene hacerlo junto con **B3** y **L7**, porque requiere reestructurar `lo
 
 ## F1 — Menú en pantalla (base de todo lo demás)
 
-- [ ] **F1.1 Máquina de estados de la app**: `PLAYING`, `MENU`, `STATIC`, `WIFI_SETUP`, `POWER_OFF`.
+- [x] **F1.1 Máquina de estados de la app**: `PLAYING`, `MENU`, `STATIC`, `WIFI_SETUP`, `POWER_OFF`.
   Sustituye la lógica actual de flags sueltos en `loop()` (`s_playing`, `s_staticTransition`, ...).
-- [ ] **F1.2 Módulo `settings`**: struct de configuración + guardado/carga en NVS con `Preferences`.
+  ✅ Aplicado (2026-10-19): `AppState` atómico con STATIC / PLAYING / MENU / POWER_OFF (WIFI_SETUP se agrega con F4). Reemplaza `s_staticTransition`/`s_staticStart`. `s_playing` se mantiene porque `audioTask` lo usa.
+- [x] **F1.2 Módulo `settings`**: struct de configuración + guardado/carga en NVS con `Preferences`.
   Incluir un número de versión del esquema para migrar ajustes en el futuro.
   Candidatos a persistir: volumen, brillo, rotación, auto-apagado por inactividad, WiFi on/off.
-- [ ] **F1.3 Cómo abrirlo**:
+  ✅ Aplicado (2026-10-19): `settings.h/.cpp`, NVS con `Preferences`, namespace `coretv`, una clave por campo más `schema`=1; los valores se validan al cargar. Se guardan volumen y brillo; rotación, inactividad y WiFi quedan reservados con sus defaults.
+- [x] **F1.3 Cómo abrirlo**:
   - **Recomendado:** pulsación **corta** de PWR (hoy libre; la larga sigue apagando).
   - Alternativas: mantener el dedo 1 s en la pantalla, o doble tap.
-- [ ] **F1.4 Navegación** (soportar ambas):
+  ✅ Aplicado (2026-10-19): PWR corto (≥ 50 ms y < 3 s), solo mientras se reproduce un episodio.
+- [x] **F1.4 Navegación** (soportar ambas):
   - Botones: BOOT = bajar, `+` = cambiar valor, PWR corto = atrás/salir.
   - Táctil: swipe arriba/abajo = moverse, tap = seleccionar/cambiar.
   - Cerrar automáticamente tras ~10 s sin interacción.
-- [ ] **F1.5 Render**: menú propio y ligero (tabla de ítems: `label`, `tipo` [enum/bool/acción],
+  ✅ Aplicado (2026-10-19): BOOT = bajar, + = cambiar (da la vuelta) o ejecutar, PWR corto = atrás/salir. Swipe arriba/abajo = moverse, izquierda/derecha = valor ∓, tap = seleccionar. Cierre a los 10 s (`MENU_TIMEOUT_MS`).
+- [x] **F1.5 Render**: menú propio y ligero (tabla de ítems: `label`, `tipo` [enum/bool/acción],
   `opciones[]`, puntero al valor) dibujado con TFT_eSPI / M5GFX, estilo "menú de servicio" de TV
   antigua (verde CRT, igual que los OSD de `gesture_control.cpp`).
   **Descartado:** LVGL (pesado, choca con el pipeline de framebuffer y con M5).
-- [ ] **F1.6 Al pausar**: detener el audio (`s_audio.stop()` o una pausa real) y guardar la posición
+  ✅ Aplicado (2026-10-19): `menu.h/.cpp`, tabla de ítems (RANGE / ENUM / ACTION; BOOL = ENUM de 2 opciones), recuadro verde CRT sobre el frame congelado, que solo se redibuja al cambiar algo. Ítems: VOLUMEN, BRILLO, INFO (versión, batería, voltaje, episodios), SALIR. Apagado, Inactividad, Rotación y WiFi se agregan con F2, F3 y F4; la IP en INFO, con F4.
+- [x] **F1.6 Al pausar**: detener el audio (`s_audio.stop()` o una pausa real) y guardar la posición
   de video/audio para retomar sin desincronía.
-- [ ] **F1.7 Gestos según el estado (sin conflicto con volumen/brillo)**:
+  ✅ Aplicado (2026-10-19): `AudioPlayer::pause()/resume()` mantiene archivo y posición. Se descarta lo que había en el anillo DMA (< 100 ms), pero `playedSamples()` sigue coherente, así que el video retoma en sincronía. El video simplemente no avanza.
+- [x] **F1.7 Gestos según el estado (sin conflicto con volumen/brillo)**:
+  ✅ Aplicado (2026-10-19): `touchTask` detecta el cambio de estado y llama `setMenuMode()` (resetea a IDLE y adopta los niveles del menú). En el menú, cada swipe produce un único `SWIPE_*` por una cola hacia `loop()`, que es el único que dibuja; volumen y brillo por gesto quedan desactivados. Además, el volumen y brillo cambiados por gesto se guardan en NVS 5 s después del último cambio.
 
   | Estado | Swipe vertical | Swipe horizontal | Tap |
   |---|---|---|---|

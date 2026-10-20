@@ -4,7 +4,7 @@
 #endif
 
 AudioPlayer::AudioPlayer()
-  : _playing(false), _playPtr(nullptr), _playSamples(0),
+  : _playing(false), _paused(false), _playPtr(nullptr), _playSamples(0),
     _fillPtr(nullptr), _fillSamples(0), _playIdx(0), _volume(128), _totalSamples(0), _startUs(0),
 #ifdef M5STACK
     _chunkStartUs(0) {}
@@ -18,6 +18,7 @@ bool AudioPlayer::begin() {
 
 bool AudioPlayer::playFile(const char* path) {
   stop();
+  _paused = false;
   _file = SD_FS.open(path, FILE_READ);
   if (!_file) {
     log_e("Failed to open audio: %s", path);
@@ -66,8 +67,18 @@ void AudioPlayer::stop() {
   if (_file) _file.close();
 }
 
+void AudioPlayer::pause() {
+  if (!_playing || _paused) return;
+  _paused = true;
+  SPEAKER_OBJ.stop(0);  // Silence now instead of looping the DMA ring
+}
+
+void AudioPlayer::resume() {
+  _paused = false;  // audioTask refills on its next pass
+}
+
 bool AudioPlayer::needsFill() {
-  if (!_playing) return false;
+  if (!_playing || _paused) return false;
   if (SPEAKER_OBJ.isPlaying(0)) return false;
   return true;
 }

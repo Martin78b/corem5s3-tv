@@ -5,8 +5,7 @@
 #include "config.h"
 
 struct VideoFile {
-  char path[EPISODE_PATH_MAX];
-  char pcmPath[EPISODE_PATH_MAX];
+  char path[EPISODE_PATH_MAX];  // "/<base>.mjpeg"; the audio is "/<base>.pcm"
 };
 
 class VideoPlayer {
@@ -27,6 +26,8 @@ public:
 
   static int scanEpisodes(VideoFile* episodes, int maxEpisodes);
   static bool hasAudio(const VideoFile& episode);
+  // Builds "/<base>.pcm" from the episode's .mjpeg path (always fits: shorter)
+  static void pcmPath(const VideoFile& episode, char* buf, size_t len);
   // Called after each decoded block (e.g. to keep a display DMA transfer fed)
   static void setDrawHook(void (*hook)()) { _drawHook = hook; }
 

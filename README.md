@@ -127,7 +127,28 @@ No SD card? The display shows "NO SD CARD". No `.mjpeg` files? It shows "NO .mjp
 - **Next / previous episode** → Brief TV static, then the new channel
   - M5Stack: tap the right / left half of the screen
   - Waveshare: press BOOT (next) / + (previous)
+- **Settings menu** (Waveshare) → Short press PWR (see below)
 - **Power off** (Waveshare) → Hold PWR button 3 seconds → CRT off animation → deep sleep
+
+### Settings Menu (Waveshare)
+
+Short press **PWR** while an episode plays to open the menu. Video and audio pause, and resume where they were when it closes.
+
+| Item | Values |
+|------|--------|
+| VOLUMEN | 0–100 % (steps of 10) |
+| BRILLO | 10–100 % (steps of 10) |
+| INFO | Firmware version, battery %, voltage, episode count |
+| SALIR | Close the menu |
+
+| Action | Buttons | Touch |
+|--------|---------|-------|
+| Move | BOOT = down | Swipe up / down |
+| Change value | + (wraps around) | Swipe left / right, or tap |
+| Open INFO / SALIR | + | Tap |
+| Back / close | PWR short press | — |
+
+The menu closes by itself after 10 s without input. Volume and brightness are saved to flash (NVS) and restored at boot, both when set in the menu and when changed with swipes (saved 5 s after the last change).
 
 ### Gesture Controls (Waveshare)
 
@@ -216,6 +237,8 @@ CoreM5S3-TV/
 │       ├── backlight.h/.cpp       # PWM backlight control
 │       ├── battery_monitor.h      # Battery voltage/percentage monitoring
 │       ├── gesture_control.h/.cpp # Touch gesture volume/brightness
+│       ├── menu.h/.cpp            # On-screen settings menu (Waveshare)
+│       ├── settings.h/.cpp        # Settings persisted in NVS
 │       ├── es8311.h/.cpp          # ES8311 DAC driver (Waveshare)
 │       ├── logo_240.h             # Boot logo for 240x240 displays
 │       └── logo_320.h             # Boot logo for 320x240 displays
@@ -258,7 +281,7 @@ Internal SRAM (512 KB):
 
 - [x] Random episode mode (✓ — default behavior)
 - [x] Channel up/down (touch or hardware buttons — needs wiring)
-- [ ] 1990s TV UI with OSD menus
+- [x] 1990s TV UI with OSD menus (settings menu on Waveshare)
 - [x] Simpsons intro boot animation (✓ — basic animation present)
 - [x] Volume control (via touch gestures on Waveshare)
 - [ ] Sleep timer
@@ -284,6 +307,8 @@ Internal SRAM (512 KB):
 - Copy files to SD card root (not in a subfolder)
 - Check file extensions are `.mjpeg`
 - File names longer than 94 characters are skipped (see the serial log)
+- Up to 250 episodes are loaded (`MAX_EPISODES` in config.h); extra files are skipped
+- macOS `._*` files (created when copying from a Mac) are ignored
 
 **Video stuttering:**
 - Re-convert with `--fps 15` (or lower)

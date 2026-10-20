@@ -56,6 +56,11 @@ enum class GestureState : uint8_t {
 enum class GestureResult : uint8_t {
   NONE,         // Nothing actionable (swipe in progress, or no gesture)
   TAP,          // A tap was detected (finger lifted without significant movement)
+  // Menu mode only: one event per swipe, when its direction is recognized
+  SWIPE_UP,
+  SWIPE_DOWN,
+  SWIPE_LEFT,
+  SWIPE_RIGHT,
 };
 
 // Forward declarations for audio/backlight control callbacks
@@ -78,6 +83,11 @@ public:
   // Direct trigger for hardware gesture events (step in +/- %)
   void triggerVolumeStep(int deltaPercent);
   void triggerBrightnessStep(int deltaPercent);
+
+  // Menu mode: swipes return SWIPE_* events instead of changing volume /
+  // brightness. Also drops any gesture in progress and adopts the given
+  // levels (the menu may have changed them). Call from the touch task only.
+  void setMenuMode(bool menu, uint8_t volumePct, uint8_t brightnessPct);
 
   // Render OSD overlay if active onto `g` (the display or a frame buffer).
   // Call for each video frame.
@@ -104,6 +114,7 @@ private:
   GestureControlConfig _cfg;
   GestureState _state;
   AudioPlayer* _audio;
+  bool _menuMode;
 
   // Touch tracking
   int16_t  _startX, _startY;
