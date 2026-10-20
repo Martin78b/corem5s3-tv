@@ -35,6 +35,9 @@
 #define AUDIO_I2S_DOUT 12
 #define AUDIO_I2S_MCLK 8
 #define AUDIO_PA_CTRL 7
+// Mono I2S frames (I2S_CHANNEL_FMT_ONLY_LEFT) broke audio on the Waveshare
+// with the legacy S3 I2S driver, so samples are duplicated to stereo.
+#define AUDIO_I2S_MONO 0
 #else
 #define AUDIO_I2S_BCLK 9
 #define AUDIO_I2S_WS 0
@@ -43,6 +46,9 @@
 #define AUDIO_DMA_BUF_COUNT 8
 #define AUDIO_DMA_BUF_LEN 512
 #define AUDIO_READ_SIZE 8192
+#ifndef AUDIO_I2S_MONO
+#define AUDIO_I2S_MONO 0
+#endif
 
 // ── SD Card ──
 #ifdef WAVESHARE_154
@@ -94,13 +100,26 @@
 #define CRT_CURVATURE 0
 #define CRT_STATIC_FRAMES 40
 
+// ── Display DMA (TFT_eSPI only) ──
+// Sends each frame by DMA while the next one is decoded. Waveshare only: on
+// the generic board the SD card may share the SPI host that initDMA() claims.
+#ifndef DISPLAY_DMA
+#ifdef WAVESHARE_154
+#define DISPLAY_DMA 1
+#else
+#define DISPLAY_DMA 0
+#endif
+#endif
+
 // ── Episode Playback ──
 #define MAX_EPISODES 100
+#define EPISODE_PATH_MAX 96   // Longer file names are skipped with a warning
 #define BOOT_DELAY_MS 500
 
 // ── TV UI ──
 #define CHANNEL_OSD_MS 2000
 #define LOW_BATTERY_OSD_MS 3000
+#define BATTERY_OSD_MS 10000   // Battery level shown at episode start
 #define STATIC_TRANSITION_MS 1000   // Static at boot, before the first episode
 #define EPISODE_STATIC_MS 1500      // Static between episodes
 #define CHANNEL_STATIC_MS 800       // Static on manual channel change

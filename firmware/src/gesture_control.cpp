@@ -36,8 +36,10 @@ GestureController::GestureController()
       _startTimeMs(0),
       _volumePct(50),
       _brightnessPct(100),
-      _volumeOsdEnd(0),
-      _brightnessOsdEnd(0) {}
+      _volumeOsdStart(0),
+      _brightnessOsdStart(0),
+      _volumeOsdShown(false),
+      _brightnessOsdShown(false) {}
 
 void GestureController::begin(AudioPlayer* audio, uint8_t initialVolumePct, uint8_t initialBrightnessPct) {
   _audio = audio;
@@ -147,21 +149,21 @@ GestureResult GestureController::update(uint8_t fingerCount, int16_t x, int16_t 
 }
 
 // ── Helper: Dibuja un sol verde estilo TV vintage ──
-static void drawSunIcon(int cx, int cy, uint16_t color) {
+static void drawSunIcon(Gfx& g, int cx, int cy, uint16_t color) {
   // Círculo central
-  Display.drawCircle(cx, cy, 3, color);
-  Display.drawCircle(cx, cy, 2, color);
+  g.drawCircle(cx, cy, 3, color);
+  g.drawCircle(cx, cy, 2, color);
 
   // 8 Rayos solares (arriba, abajo, izq, der y 4 diagonales)
-  Display.drawLine(cx, cy - 5, cx, cy - 8, color);     // Arriba
-  Display.drawLine(cx, cy + 5, cx, cy + 8, color);     // Abajo
-  Display.drawLine(cx - 5, cy, cx - 8, cy, color);     // Izquierda
-  Display.drawLine(cx + 5, cy, cx + 8, cy, color);     // Derecha
+  g.drawLine(cx, cy - 5, cx, cy - 8, color);     // Arriba
+  g.drawLine(cx, cy + 5, cx, cy + 8, color);     // Abajo
+  g.drawLine(cx - 5, cy, cx - 8, cy, color);     // Izquierda
+  g.drawLine(cx + 5, cy, cx + 8, cy, color);     // Derecha
 
-  Display.drawLine(cx - 4, cy - 4, cx - 6, cy - 6, color); // Arriba-Izq
-  Display.drawLine(cx + 4, cy - 4, cx + 6, cy - 6, color); // Arriba-Der
-  Display.drawLine(cx - 4, cy + 4, cx - 6, cy + 6, color); // Abajo-Izq
-  Display.drawLine(cx + 4, cy + 4, cx + 6, cy + 6, color); // Abajo-Der
+  g.drawLine(cx - 4, cy - 4, cx - 6, cy - 6, color); // Arriba-Izq
+  g.drawLine(cx + 4, cy - 4, cx + 6, cy - 6, color); // Arriba-Der
+  g.drawLine(cx - 4, cy + 4, cx - 6, cy + 6, color); // Abajo-Izq
+  g.drawLine(cx + 4, cy + 4, cx + 6, cy + 6, color); // Abajo-Der
 }
 
 void GestureController::triggerVolumeStep(int deltaPercent) {
@@ -175,8 +177,9 @@ void GestureController::triggerVolumeStep(int deltaPercent) {
     if (_audio) {
       _audio->setVolume(hwVol);
     }
-    _volumeOsdEnd = millis() + _cfg.osd_timeout_ms;
-    showVolumeOSD();
+    _volumeOsdStart = millis();
+    _volumeOsdShown = true;
+    showVolumeOSD(Display);
   }
 }
 
@@ -188,8 +191,9 @@ void GestureController::triggerBrightnessStep(int deltaPercent) {
   if ((uint8_t)newBri != _brightnessPct) {
     _brightnessPct = (uint8_t)newBri;
     Backlight::setBrightness(_brightnessPct);
-    _brightnessOsdEnd = millis() + _cfg.osd_timeout_ms;
-    showBrightnessOSD();
+    _brightnessOsdStart = millis();
+    _brightnessOsdShown = true;
+    showBrightnessOSD(Display);
   }
 }
 
@@ -220,7 +224,8 @@ void GestureController::applyVolumeDelta(int deltaPx) {
 
     GESTURE_LOG("volume %d%% -> %d%%", oldVol, _volumePct);
 
-    _volumeOsdEnd = millis() + _cfg.osd_timeout_ms;
+    _volumeOsdStart = millis();
+    _volumeOsdShown = true;
     // OSD is rendered by the main loop via renderOSD(), not here —
     // calling Display functions from the touch task causes SPI bus contention.
   }
@@ -248,22 +253,23 @@ void GestureController::applyBrightnessDelta(int deltaPx) {
 
     GESTURE_LOG("brightness %d%% -> %d%%", oldBri, _brightnessPct);
 
-    _brightnessOsdEnd = millis() + _cfg.osd_timeout_ms;
+    _brightnessOsdStart = millis();
+    _brightnessOsdShown = true;
     // OSD is rendered by the main loop via renderOSD(), not here —
     // calling Display functions from the touch task causes SPI bus contention.
   }
 }
 
 // ── OSD Rendering (Estilo TV CRT Verde) ──
-void GestureController::showVolumeOSD() {
+void GestureController::showVolumeOSD(Gfx& g) {
   int w = 110, h = 32;
   int x = (DISPLAY_WIDTH - w) / 2;
   int y = 35;
 
   // Caja de TV estilo retro negro con borde verde
-  Display.fillRect(x, y, w, h, TFT_BLACK);
-  Display.drawRect(x, y, w, h, TFT_GREEN);
-  Display.drawRect(x + 1, y + 1, w - 2, h - 2, TFT_GREEN);
+  g.fillRect(x, y, w, h, TFT_BLACK);
+  g.drawRect(x, y, w, h, TFT_GREEN);
+  g.drawRect(x + 1, y + 1, w - 2, h - 2, TFT_GREEN);
 
   // Texto VOL + Porcentaje en Verde CRT
   char buf[16];
@@ -272,61 +278,61 @@ void GestureController::showVolumeOSD() {
   } else {
     snprintf(buf, sizeof(buf), "VOL  %3d%%", _volumePct);
   }
-  Display.setTextSize(1);
-  Display.setTextColor(TFT_GREEN, TFT_BLACK);
-  Display.drawString(buf, x + 8, y + 5);
+  g.setTextSize(1);
+  g.setTextColor(TFT_GREEN, TFT_BLACK);
+  g.drawString(buf, x + 8, y + 5);
 
   // Barra de progreso en bloques verdes
   int barY = y + 20;
   int barW = w - 16;
-  Display.fillRect(x + 8, barY, barW, 6, TFT_BLACK);
-  Display.drawRect(x + 8, barY, barW, 6, TFT_GREEN);
+  g.fillRect(x + 8, barY, barW, 6, TFT_BLACK);
+  g.drawRect(x + 8, barY, barW, 6, TFT_GREEN);
 
   int fillW = (barW - 2) * _volumePct / 100;
   if (fillW > 0) {
-    Display.fillRect(x + 9, barY + 1, fillW, 4, TFT_GREEN);
+    g.fillRect(x + 9, barY + 1, fillW, 4, TFT_GREEN);
   }
 }
 
-void GestureController::showBrightnessOSD() {
+void GestureController::showBrightnessOSD(Gfx& g) {
   int w = 120, h = 32;
   int x = (DISPLAY_WIDTH - w) / 2;
   int y = 35;
 
   // Caja retro negro con borde verde
-  Display.fillRect(x, y, w, h, TFT_BLACK);
-  Display.drawRect(x, y, w, h, TFT_GREEN);
-  Display.drawRect(x + 1, y + 1, w - 2, h - 2, TFT_GREEN);
+  g.fillRect(x, y, w, h, TFT_BLACK);
+  g.drawRect(x, y, w, h, TFT_GREEN);
+  g.drawRect(x + 1, y + 1, w - 2, h - 2, TFT_GREEN);
 
   // Icono del Sol Verde a la izquierda (centro x+14, y+16)
-  drawSunIcon(x + 14, y + 16, TFT_GREEN);
+  drawSunIcon(g, x + 14, y + 16, TFT_GREEN);
 
   // Texto BRI + Porcentaje
   char buf[16];
   snprintf(buf, sizeof(buf), "BRI  %3d%%", _brightnessPct);
-  Display.setTextSize(1);
-  Display.setTextColor(TFT_GREEN, TFT_BLACK);
-  Display.drawString(buf, x + 28, y + 5);
+  g.setTextSize(1);
+  g.setTextColor(TFT_GREEN, TFT_BLACK);
+  g.drawString(buf, x + 28, y + 5);
 
   // Barra de brillo en verde CRT
   int barY = y + 20;
   int barW = w - 36;
-  Display.fillRect(x + 28, barY, barW, 6, TFT_BLACK);
-  Display.drawRect(x + 28, barY, barW, 6, TFT_GREEN);
+  g.fillRect(x + 28, barY, barW, 6, TFT_BLACK);
+  g.drawRect(x + 28, barY, barW, 6, TFT_GREEN);
 
   int fillW = (barW - 2) * _brightnessPct / 100;
   if (fillW > 0) {
-    Display.fillRect(x + 29, barY + 1, fillW, 4, TFT_GREEN);
+    g.fillRect(x + 29, barY + 1, fillW, 4, TFT_GREEN);
   }
 }
 
-void GestureController::renderOSD() {
+void GestureController::renderOSD(Gfx& g) {
   uint32_t now = millis();
-  if (now < _volumeOsdEnd) {
-    showVolumeOSD();
+  if (_volumeOsdShown && now - _volumeOsdStart < _cfg.osd_timeout_ms) {
+    showVolumeOSD(g);
   }
-  if (now < _brightnessOsdEnd) {
-    showBrightnessOSD();
+  if (_brightnessOsdShown && now - _brightnessOsdStart < _cfg.osd_timeout_ms) {
+    showBrightnessOSD(g);
   }
 }
 

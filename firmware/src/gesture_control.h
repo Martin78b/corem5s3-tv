@@ -79,8 +79,9 @@ public:
   void triggerVolumeStep(int deltaPercent);
   void triggerBrightnessStep(int deltaPercent);
 
-  // Render OSD overlay if active. Call after drawing each video frame.
-  void renderOSD();
+  // Render OSD overlay if active onto `g` (the display or a frame buffer).
+  // Call for each video frame.
+  void renderOSD(Gfx& g);
 
   // Current volume percentage (0-100)
   uint8_t getVolumePct() const { return _volumePct; }
@@ -113,13 +114,16 @@ private:
   uint8_t _volumePct;       // 0-100
   uint8_t _brightnessPct;   // min..max
 
-  // OSD state
-  uint32_t _volumeOsdEnd;
-  uint32_t _brightnessOsdEnd;
+  // OSD state. Set from touchTask, read from loop(). Compared as elapsed
+  // time (now - start < timeout), which is safe across the millis() overflow.
+  volatile uint32_t _volumeOsdStart;
+  volatile uint32_t _brightnessOsdStart;
+  volatile bool _volumeOsdShown;
+  volatile bool _brightnessOsdShown;
 
   // Internal helpers
   void applyVolumeDelta(int deltaPx);
   void applyBrightnessDelta(int deltaPx);
-  void showVolumeOSD();
-  void showBrightnessOSD();
+  void showVolumeOSD(Gfx& g);
+  void showBrightnessOSD(Gfx& g);
 };

@@ -18,6 +18,8 @@ public:
   void setVolume(uint8_t vol);
   uint32_t getPlaybackTimeUs();
   uint32_t totalSamples() const;
+  // Samples actually played (heard) so far in this file: what video syncs to.
+  uint32_t playedSamples() const;
 
 private:
   File _file;
@@ -32,4 +34,9 @@ private:
   uint8_t _volume;
   volatile uint32_t _totalSamples;
   uint64_t _startUs;
+#ifdef M5STACK
+  volatile uint32_t _chunkStartUs;  // When the current chunk was queued
+#else
+  uint32_t _baseSamples;            // SPEAKER_OBJ.samplesWritten() at file start
+#endif
 };

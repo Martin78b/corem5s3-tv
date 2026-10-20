@@ -8,6 +8,7 @@
   #define SPEAKER_OBJ M5.Speaker
 #else
 
+#include <atomic>
 #include <driver/i2s.h>
 #include <esp_err.h>
 
@@ -24,7 +25,7 @@ public:
       .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
       .sample_rate = (uint32_t)sampleRate,
       .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-      .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+      .channel_format = AUDIO_I2S_MONO ? I2S_CHANNEL_FMT_ONLY_LEFT : I2S_CHANNEL_FMT_RIGHT_LEFT,
       .communication_format = I2S_COMM_FORMAT_STAND_I2S,
       .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
       .dma_buf_count = AUDIO_DMA_BUF_COUNT,
@@ -52,30 +53,41 @@ public:
     return true;
   }
 
+  // Blocks until all samples are queued in the I2S DMA ring.
   void playRaw(const int16_t* data, size_t samples, uint32_t sampleRate, bool, int, uint8_t vol, bool) {
     if (!_started) return;
     _playing = true;
     _volume = vol;
     size_t written;
     _writeUs = micros();
-    _writeBytes = samples * 4;
+    _writeBytes = samples * BYTES_PER_FRAME;
+    // Perceptual (square-law) gain, 16.16 fixed point; 255 = unity
+    const uint32_t gain = (uint32_t)vol * vol * 65536 / (255 * 255);
     const size_t CHUNK = 256;
-    int16_t stereo[CHUNK * 2];
+    int16_t out[CHUNK * CHANNELS];
     size_t remaining = samples;
     const int16_t* src = data;
     while (remaining > 0) {
       size_t n = (remaining > CHUNK) ? CHUNK : remaining;
-      uint8_t v = _volume;
-      for (size_t i = 0; i < n; i++) {
-        int32_t s = (int32_t)src[i] * v / 255;
-        stereo[i * 2]     = (int16_t)s;
-        stereo[i * 2 + 1] = (int16_t)s;
+      const int16_t* buf = src;
+      if (CHANNELS == 2 || gain != 65536) {
+        for (size_t i = 0; i < n; i++) {
+          int16_t s = (int16_t)(((int32_t)src[i] * (int32_t)gain) >> 16);
+          for (int c = 0; c < CHANNELS; c++) out[i * CHANNELS + c] = s;
+        }
+        buf = out;
       }
-      i2s_write(I2S_NUM_0, stereo, n * 4, &written, portMAX_DELAY);
+      i2s_write(I2S_NUM_0, buf, n * BYTES_PER_FRAME, &written, portMAX_DELAY);
+      _samplesOut += n;
       src += n;
       remaining -= n;
     }
   }
+
+  // Total samples handed to the I2S driver since boot (wraps at 2^32).
+  // The ones still in the DMA ring (AUDIO_DMA_BUF_COUNT * AUDIO_DMA_BUF_LEN)
+  // have not been heard yet.
+  uint32_t samplesWritten() const { return _samplesOut; }
 
   void startClocks() {
     if (!_started) return;
@@ -90,7 +102,7 @@ public:
   bool isPlaying(int = 0) {
     if (!_started || !_playing) return false;
     uint64_t elapsed = micros() - _writeUs;
-    uint64_t expected = (uint64_t)_writeBytes * 1000000 / (4 * _sampleRate);  // 4 bytes per stereo sample pair
+    uint64_t expected = (uint64_t)_writeBytes * 1000000 / (BYTES_PER_FRAME * _sampleRate);
     return elapsed < expected;
   }
 
@@ -99,6 +111,9 @@ public:
   }
 
 private:
+  static constexpr int CHANNELS = AUDIO_I2S_MONO ? 1 : 2;
+  static constexpr int BYTES_PER_FRAME = CHANNELS * 2;
+  std::atomic<uint32_t> _samplesOut{0};
   bool _started;
   bool _playing;
   uint8_t _volume;

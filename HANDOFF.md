@@ -75,28 +75,35 @@ Antes de aplicar un ítem, verificar que las líneas citadas siguen siendo las m
 - [x] **R3. Descarte de frames**: si el video va atrasado más de 1–2 frames respecto al audio,
   leer el frame sin decodificar (`main.cpp:454-472`).
   ✅ Aplicado (2026-10-19): si el video va más de `VIDEO_MAX_LAG_FRAMES` (2) atrás del audio, se leen y descartan frames sin decodificar, como máximo `VIDEO_MAX_SKIP_PER_LOOP` (8) por vuelta.
-- [ ] **R4. Offset de sincronía**: `totalSamples()` cuenta muestras encoladas, no reproducidas →
+- [x] **R4. Offset de sincronía**: `totalSamples()` cuenta muestras encoladas, no reproducidas →
   video adelantado ~90–180 ms. Restar la latencia de DMA + chunk.
-- [ ] **R5. Overflow de `millis()`**: comparaciones como `nowMs < s_channelOsdEnd` (`main.cpp:486, 492`,
+  ✅ Aplicado (2026-10-19): `AudioPlayer::playedSamples()`. Waveshare/genérica: muestras entregadas a I2S (contador atómico por bloque de 256 en `I2SSpeaker`) menos el anillo DMA (`AUDIO_DMA_BUF_COUNT * AUDIO_DMA_BUF_LEN`). M5: interpolación por tiempo dentro del chunk en curso. Además el reloj ahora avanza en pasos de ~6 ms en vez de 93 ms.
+- [x] **R5. Overflow de `millis()`**: comparaciones como `nowMs < s_channelOsdEnd` (`main.cpp:486, 492`,
   `gesture_control.cpp:325-330`). Usar `(int32_t)(end - now) > 0`.
-- [ ] **R6. Rutas** (`video_player.h:7-10`, `video_player.cpp:98-130`): `char[64]` trunca en silencio;
+  ✅ Aplicado (2026-10-19): los OSD (canal, batería, batería baja, volumen/brillo) guardan el instante de inicio y comparan `now - start < duración`. Se usó eso en vez de `(int32_t)(end - now) > 0`, porque con fines viejos esta última vuelve a dar verdadero tras ~24 días.
+- [x] **R6. Rutas** (`video_player.h:7-10`, `video_player.cpp:98-130`): `char[64]` trunca en silencio;
   `strncpy` sin terminador nulo garantizado; `hasAudio()` recalcula una ruta que ya está en `pcmPath`.
   Ordenar el escaneo alfabéticamente (hoy depende del orden FAT).
-- [ ] **R7. Playlist** (`main.cpp:663-698`): al rebarajar, evitar que el primer episodio nuevo sea el último que sonó.
+  ✅ Aplicado (2026-10-19): `EPISODE_PATH_MAX 96`; `snprintf` con verificación, y los nombres que no entran se saltan con un warning. `pcmPath` se arma desde el nombre base. `hasAudio(const VideoFile&)` usa `pcmPath`. El escaneo se ordena con `qsort`/`strcasecmp`.
+- [x] **R7. Playlist** (`main.cpp:663-698`): al rebarajar, evitar que el primer episodio nuevo sea el último que sonó.
+  ✅ Aplicado (2026-10-19): al rebarajar, si el primero coincide con el último que sonó, se intercambia con otra posición al azar.
 - [ ] **R8. ES8311** (`firmware/src/es8311.cpp`): no se revisa ningún retorno de `write_reg`;
   `es8311_set_volume(255)` se llama dos veces (`main.cpp:269` y `:324`).
+  ⏳ Parcial (2026-10-19, con P2): se eliminó la segunda llamada `es8311_set_volume(255)`, porque ahora pisaría el volumen inicial. Falta revisar los retornos de `write_reg`.
 - [ ] **R9. Verificar** `BTN_PWR` (GPIO5): se configura como `OUTPUT HIGH` (`main.cpp:154-155`) y luego se lee
   con `gpio_get_level`. Confirmar en hardware/esquemático que la lectura es fiable (si el input no
   está habilitado podría leer siempre 0).
 
 ## P — Rendimiento
 
-- [ ] **P1. DMA en el display** (mayor ganancia): hoy `pushPixels` bloquea ~115 KB por frame.
+- [x] **P1. DMA en el display** (mayor ganancia): hoy `pushPixels` bloquea ~115 KB por frame.
   Usar `Display.initDMA()` + `pushImageDMA()` con doble framebuffer para decodificar N+1 mientras se envía N.
   Solo aplica a TFT_eSPI (Waveshare/genérica); M5Unified tiene su propio mecanismo.
-- [ ] **P2. Audio mono** (`firmware/src/audio_hal.h:56-79`): evitar duplicar a estéreo
+  ✅ Aplicado (2026-10-19), solo Waveshare (`DISPLAY_DMA`, se desactiva con 0): dos `TFT_eSprite` de 240×240 en PSRAM (creados antes de `initDMA()`), decodificados en big-endian. El OSD se dibuja dentro del frame, sin parpadeo. El frame N se envía en bandas de 68 filas (límite de 0x4000 px por DMA de TFT_eSPI) mediante un bounce buffer interno; `JPEGDraw` alimenta la siguiente banda mientras decodifica N+1. El DMA nunca queda en vuelo al salir de `showFrameDMA()`. Genérica: queda bloqueante porque la SD podría compartir el host SPI. M5: sin cambios.
+- [x] **P2. Audio mono** (`firmware/src/audio_hal.h:56-79`): evitar duplicar a estéreo
   (`I2S_CHANNEL_FMT_ONLY_LEFT` o mono en el ES8311) y mover el volumen al DAC (reg 0x32) o usar
   curva logarítmica en vez de `*v/255` lineal.
+  ✅ Aplicado (2026-10-19): `AUDIO_I2S_MONO` (Waveshare = 1) usa `I2S_CHANNEL_FMT_ONLY_LEFT` y escribe el PCM directo sin copiar. En Waveshare el volumen va al ES8311 (reg 0x32), con 50 dB repartidos en pasos de 0.5 dB; el PCM sale sin escalar. Genérica: curva cuadrática por software. **2026-10-19: el mono rompió el audio en hardware** → `AUDIO_I2S_MONO 0` en Waveshare (estéreo duplicado, como antes). El volumen en el DAC se mantiene. Para reintentar el mono: probar `I2S_CHANNEL_FMT_ONLY_RIGHT`, o configurar el ES8311 (reg 0x09, bit 7) para leer el slot correcto.
 - [ ] **P3. Simplificar `audioTask`**: bucle "leer SD → `i2s_write` bloqueante", eliminando el
   `isPlaying()` estimado por tiempo y el doble buffer manual. Combina bien con B3.
 

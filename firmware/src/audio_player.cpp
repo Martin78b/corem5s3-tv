@@ -1,8 +1,16 @@
 #include "audio_player.h"
+#ifdef WAVESHARE_154
+#include "es8311.h"
+#endif
 
 AudioPlayer::AudioPlayer()
   : _playing(false), _playPtr(nullptr), _playSamples(0),
-    _fillPtr(nullptr), _fillSamples(0), _playIdx(0), _volume(128), _totalSamples(0), _startUs(0) {}
+    _fillPtr(nullptr), _fillSamples(0), _playIdx(0), _volume(128), _totalSamples(0), _startUs(0),
+#ifdef M5STACK
+    _chunkStartUs(0) {}
+#else
+    _baseSamples(0) {}
+#endif
 
 bool AudioPlayer::begin() {
   return true;
@@ -18,6 +26,9 @@ bool AudioPlayer::playFile(const char* path) {
 
   _totalSamples = 0;
   _playIdx = 0;
+#ifndef M5STACK
+  _baseSamples = SPEAKER_OBJ.samplesWritten();
+#endif
   size_t br = _file.read((uint8_t*)_buf0, AUDIO_READ_SIZE);
   if (br == 0) {
     _file.close();
@@ -27,6 +38,9 @@ bool AudioPlayer::playFile(const char* path) {
   _playPtr = _buf0;
   _playSamples = br / 2;
   _totalSamples += _playSamples;
+#ifdef M5STACK
+  _chunkStartUs = micros();
+#endif
   SPEAKER_OBJ.playRaw((const int16_t*)_playPtr, _playSamples, AUDIO_SAMPLE_RATE, false, 1, _volume, true);
 
   br = _file.read((uint8_t*)_buf1, AUDIO_READ_SIZE);
@@ -69,6 +83,9 @@ void AudioPlayer::playFilled() {
   _playPtr = _fillPtr;
   _playSamples = _fillSamples;
   _totalSamples += _playSamples;
+#ifdef M5STACK
+  _chunkStartUs = micros();
+#endif
   SPEAKER_OBJ.playRaw((const int16_t*)_playPtr, _playSamples, AUDIO_SAMPLE_RATE, false, 1, _volume, true);
 }
 
@@ -96,8 +113,14 @@ bool AudioPlayer::isPlaying() {
 }
 
 void AudioPlayer::setVolume(uint8_t vol) {
+#ifdef WAVESHARE_154
+  // The ES8311 attenuates in 0.5 dB steps at no CPU cost; PCM goes out as is.
+  es8311_set_volume(vol);
+  _volume = 255;
+#else
   _volume = vol;
-  SPEAKER_OBJ.setVolume(vol);
+#endif
+  SPEAKER_OBJ.setVolume(_volume);
 }
 
 uint32_t AudioPlayer::getPlaybackTimeUs() {
@@ -108,4 +131,23 @@ uint32_t AudioPlayer::getPlaybackTimeUs() {
 
 uint32_t AudioPlayer::totalSamples() const {
   return _totalSamples;
+}
+
+uint32_t AudioPlayer::playedSamples() const {
+#ifdef M5STACK
+  // M5Unified queues a whole chunk and returns: interpolate within the
+  // current chunk by the time elapsed since it was queued.
+  uint32_t chunk = _playSamples;
+  uint32_t total = _totalSamples;
+  if (total < chunk) return 0;
+  uint32_t elapsed = (uint64_t)(micros() - _chunkStartUs) * AUDIO_SAMPLE_RATE / 1000000;
+  if (elapsed > chunk) elapsed = chunk;
+  return total - chunk + elapsed;
+#else
+  // Everything handed to I2S, minus what still sits in the DMA ring
+  // (it is kept full because i2s_write blocks).
+  const uint32_t queued = AUDIO_DMA_BUF_COUNT * AUDIO_DMA_BUF_LEN;
+  uint32_t written = SPEAKER_OBJ.samplesWritten() - _baseSamples;
+  return written > queued ? written - queued : 0;
+#endif
 }

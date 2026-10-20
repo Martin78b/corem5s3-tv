@@ -5,8 +5,8 @@
 #include "config.h"
 
 struct VideoFile {
-  char path[64];
-  char pcmPath[64];
+  char path[EPISODE_PATH_MAX];
+  char pcmPath[EPISODE_PATH_MAX];
 };
 
 class VideoPlayer {
@@ -15,7 +15,8 @@ public:
   bool begin();
   bool openFile(const char* path);
   uint32_t readNextFrame();
-  bool     decodeFrame(uint16_t* framebuffer);
+  // bigEndian: write pixels in display byte order (for TFT_eSprite buffers)
+  bool     decodeFrame(uint16_t* framebuffer, bool bigEndian = false);
   void close();
   bool isOpen();
   int  totalFrames();
@@ -25,7 +26,9 @@ public:
   uint32_t sampleRate() const { return _sampleRate; }
 
   static int scanEpisodes(VideoFile* episodes, int maxEpisodes);
-  static bool hasAudio(const char* videoPath);
+  static bool hasAudio(const VideoFile& episode);
+  // Called after each decoded block (e.g. to keep a display DMA transfer fed)
+  static void setDrawHook(void (*hook)()) { _drawHook = hook; }
 
 private:
   File _file;
@@ -42,4 +45,5 @@ private:
   void readHeader();
   static int JPEGDraw(JPEGDRAW* draw);
   static uint16_t* _drawTarget;
+  static void (*_drawHook)();
 };

@@ -40,7 +40,7 @@ static uint16_t *s_framebuffer = nullptr;
 static std::atomic<bool> s_playing{false};  // Read by audioTask (core 0)
 static bool s_staticTransition = false;
 static uint32_t s_staticStart = 0;
-static uint32_t s_channelOsdEnd = 0;
+static uint32_t s_channelOsdStart = 0;
 static int s_channelNumber = 1;
 static int s_playlist[MAX_EPISODES];
 static int s_playlistIndex = 0;
@@ -52,8 +52,8 @@ static uint32_t s_nextFrameToShow = 0;
 static uint32_t s_audioFinishedAt = 0;
 static bool s_audioEndHandled = false;
 static bool s_lowBatteryWarned = false;
-static uint32_t s_batteryOsdEnd = 0;
-static uint32_t s_lowBatteryOsdEnd = 0;
+static uint32_t s_batteryOsdStart = 0;
+static uint32_t s_lowBatteryOsdStart = 0;
 
 #ifdef WAVESHARE_154
 static GestureController s_gesture;
@@ -71,6 +71,22 @@ I2SSpeaker Speaker;
 static SemaphoreHandle_t s_sdMutex = NULL;     // Any SD card access
 static SemaphoreHandle_t s_audioMutex = NULL;  // AudioPlayer state (s_audio)
 
+#if DISPLAY_DMA
+// Double-buffered frames for DMA: the front one is sent to the display while
+// the next frame is decoded into the back one. Sprites (not plain buffers) so
+// the OSD can be drawn into the frame before it is sent. Their pixels are in
+// display byte order (big-endian RGB565).
+static TFT_eSprite s_frames[2] = {TFT_eSprite(&Display), TFT_eSprite(&Display)};
+static int s_back = 0;              // Index of the buffer being decoded into
+static bool s_frontReady = false;   // s_frames[1 - s_back] holds frame s_nextFrameToShow
+static bool s_dmaEnabled = false;
+static uint16_t *s_dmaBounce = nullptr;  // Internal DMA-capable copy of one chunk
+static const uint16_t *s_pushSrc = nullptr;
+static int s_pushRow = DISPLAY_HEIGHT;   // Next row to send; DISPLAY_HEIGHT = done
+// TFT_eSPI sends at most 0x4000 pixels per DMA transfer (more is pushed blocking)
+static const int DMA_CHUNK_ROWS = 0x4000 / DISPLAY_WIDTH;
+#endif
+
 static void initDisplay();
 static bool initSDCard();
 static void buildPlaylist(bool shuffle);
@@ -78,8 +94,15 @@ static void playEpisode(int index);
 static void nextEpisode();
 static void prevEpisode();
 static void showTVStatic(uint32_t durationMs);
-static void showChannelOSD(int channel);
-static void showBatteryOSD(const BatteryMonitor::State& bat);
+static void showChannelOSD(Gfx &g, int channel);
+static void showBatteryOSD(Gfx &g, const BatteryMonitor::State& bat);
+static void composeOSD(Gfx &g);
+static uint32_t readFrame(uint32_t &index, uint32_t audioFrame);
+static void showFrame(uint32_t audioFrame);
+#if DISPLAY_DMA
+static bool initDisplayDMA();
+static void showFrameDMA(uint32_t audioFrame);
+#endif
 static void showBootAnimation();
 static void showCRTOffAnimation();
 static void handleTouch();
@@ -333,6 +356,10 @@ void setup() {
     }
   }
   log_i("Framebuffer: %p (PSRAM)", s_framebuffer);
+#if DISPLAY_DMA
+  s_dmaEnabled = initDisplayDMA();
+  log_i("Display DMA: %s", s_dmaEnabled ? "on" : "off (fallback to blocking push)");
+#endif
 
   if (!s_video.begin()) {
     Display.drawString("VIDEO INIT FAIL", 40, 140);
@@ -356,7 +383,6 @@ void setup() {
   // Initialize gesture controller with default volume 90% and brightness 100%
   s_gesture.begin(&s_audio, 90, 100);
   s_audio.setVolume(GestureController::pctToHwVolume(90));
-  es8311_set_volume(255); // 0dB (full volume for ES8311 DAC)
 #endif
 
   s_episodeCount = VideoPlayer::scanEpisodes(s_episodes, MAX_EPISODES);
@@ -459,58 +485,71 @@ void loop() {
 
   // Frame pacing - driven by audio progress to prevent A/V drift
   uint32_t audioFrame =
-      (uint64_t)s_audio.totalSamples() * s_video.fps() / AUDIO_SAMPLE_RATE;
+      (uint64_t)s_audio.playedSamples() * s_video.fps() / AUDIO_SAMPLE_RATE;
   if (audioFrame < s_nextFrameToShow) {
     delay(1);
     return;
   }
 
-  // Read and decode frame
-  bool decoded = false;
-  {
-    bool got = xSemaphoreTake(s_sdMutex, pdMS_TO_TICKS(50)) == pdTRUE;
-    if (got) {
-      uint32_t fs = s_video.readNextFrame();
-      // Video behind audio: discard frames (read, no decode) to catch up.
-      for (int skipped = 0;
-           fs > 0 && skipped < VIDEO_MAX_SKIP_PER_LOOP &&
-           audioFrame > s_nextFrameToShow + VIDEO_MAX_LAG_FRAMES;
-           skipped++) {
-        s_nextFrameToShow++;
-        fs = s_video.readNextFrame();
-      }
-      xSemaphoreGive(s_sdMutex);
-      if (fs > 0) {
-        decoded = s_video.decodeFrame(s_framebuffer);
-      }
-    }
-  }
-
-  if (!decoded) {
+#if DISPLAY_DMA
+  if (s_dmaEnabled) {
+    showFrameDMA(audioFrame);
     return;
   }
+#endif
+  showFrame(audioFrame);
+}
 
-  // Write decoded frame to display
+// Reads the next frame from SD into the JPEG buffer. If video is behind audio,
+// discards frames (read, no decode) to catch up; `index` is advanced for each
+// one skipped, so it ends as the index of the frame that was read.
+static uint32_t readFrame(uint32_t &index, uint32_t audioFrame) {
+  if (xSemaphoreTake(s_sdMutex, pdMS_TO_TICKS(50)) != pdTRUE) return 0;
+  uint32_t fs = s_video.readNextFrame();
+  for (int skipped = 0;
+       fs > 0 && skipped < VIDEO_MAX_SKIP_PER_LOOP &&
+       audioFrame > index + VIDEO_MAX_LAG_FRAMES;
+       skipped++) {
+    index++;
+    fs = s_video.readNextFrame();
+  }
+  xSemaphoreGive(s_sdMutex);
+  return fs;
+}
+
+// Blocking path: decode, push the whole frame, then draw the OSD on top.
+static void showFrame(uint32_t audioFrame) {
+  if (readFrame(s_nextFrameToShow, audioFrame) == 0) return;
+  if (!s_video.decodeFrame(s_framebuffer)) return;
+
   Display.startWrite();
   Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
   displayWritePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
   Display.endWrite();
   s_nextFrameToShow++;
 
+  composeOSD(Display);
+}
+
+// Draws every active OSD (channel, battery, gestures, low battery) onto `g`:
+// the display itself, or a frame buffer before it is sent.
+static void composeOSD(Gfx &g) {
   uint32_t nowMs = millis();
-  if (nowMs < s_channelOsdEnd) {
-    showChannelOSD(s_channelNumber);
+  // Elapsed-time checks (now - start < duration) are safe across the
+  // millis() overflow.
+  if (nowMs - s_channelOsdStart < CHANNEL_OSD_MS) {
+    showChannelOSD(g, s_channelNumber);
   }
 
-  // Battery OSD: show 10s at episode start, or always when <= 20%
+  // Battery OSD: show at episode start, or always when <= 20%
   BatteryMonitor::State bat = BatteryMonitor::update();
-  if (nowMs < s_batteryOsdEnd || (bat.valid && bat.percentage <= 20)) {
-    showBatteryOSD(bat);
+  if (nowMs - s_batteryOsdStart < BATTERY_OSD_MS ||
+      (bat.valid && bat.percentage <= 20)) {
+    showBatteryOSD(g, bat);
   }
 
 #ifdef WAVESHARE_154
-  // Render gesture OSD overlay on top of video frame
-  s_gesture.renderOSD();
+  s_gesture.renderOSD(g);
 #endif
 
   // Low battery warning: once per discharge, re-armed when charging.
@@ -519,14 +558,93 @@ void loop() {
     s_lowBatteryWarned = false;
   } else if (bat.valid && bat.percentage <= 10 && !s_lowBatteryWarned) {
     s_lowBatteryWarned = true;
-    s_lowBatteryOsdEnd = nowMs + LOW_BATTERY_OSD_MS;
+    s_lowBatteryOsdStart = nowMs;
   }
-  if (nowMs < s_lowBatteryOsdEnd) {
-    Display.setTextSize(2);
-    Display.setTextColor(TFT_RED, TFT_BLACK);
-    Display.drawString("LOW BATTERY", 30, 100);
+  if (s_lowBatteryWarned && nowMs - s_lowBatteryOsdStart < LOW_BATTERY_OSD_MS) {
+    g.setTextSize(2);
+    g.setTextColor(TFT_RED, TFT_BLACK);
+    g.drawString("LOW BATTERY", 30, 100);
   }
 }
+
+#if DISPLAY_DMA
+// Sprites must be created before initDMA(): once DMA is on, TFT_eSprite
+// allocates in internal RAM, where two full frames don't fit.
+static bool initDisplayDMA() {
+  for (auto &f : s_frames) {
+    f.setColorDepth(16);
+    if (!f.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT)) return false;
+  }
+  s_dmaBounce = (uint16_t *)heap_caps_malloc(
+      DISPLAY_WIDTH * DMA_CHUNK_ROWS * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  if (!s_dmaBounce) return false;
+  return Display.initDMA();
+}
+
+// Queues the next band of rows if the DMA is idle. Never blocks, so it can be
+// called from the JPEG decoder callback to keep the transfer going.
+static void pushNextChunk() {
+  if (s_pushRow >= DISPLAY_HEIGHT || Display.dmaBusy()) return;
+  int rows = DISPLAY_HEIGHT - s_pushRow;
+  if (rows > DMA_CHUNK_ROWS) rows = DMA_CHUNK_ROWS;
+  // PSRAM is not DMA-capable here: copy the band to internal RAM first.
+  memcpy(s_dmaBounce, s_pushSrc + s_pushRow * DISPLAY_WIDTH,
+         rows * DISPLAY_WIDTH * 2);
+  Display.pushImageDMA(0, s_pushRow, DISPLAY_WIDTH, rows, s_dmaBounce);
+  s_pushRow += rows;
+}
+
+static void startPush(const uint16_t *frame) {
+  Display.startWrite();
+  Display.setSwapBytes(false);  // Sprite pixels are already in display order
+  s_pushSrc = frame;
+  s_pushRow = 0;
+  pushNextChunk();
+  VideoPlayer::setDrawHook(pushNextChunk);
+}
+
+static void finishPush() {
+  VideoPlayer::setDrawHook(nullptr);
+  while (s_pushRow < DISPLAY_HEIGHT) {
+    Display.dmaWait();
+    pushNextChunk();
+  }
+  Display.dmaWait();
+  Display.setSwapBytes(true);
+  Display.endWrite();
+}
+
+// Reads and decodes the next frame into s_frames[buf] and draws the OSD on it.
+static bool decodeInto(int buf, uint32_t &index, uint32_t audioFrame) {
+  if (readFrame(index, audioFrame) == 0) return false;
+  if (!s_video.decodeFrame((uint16_t *)s_frames[buf].getPointer(), true)) {
+    return false;
+  }
+  composeOSD(s_frames[buf]);
+  return true;
+}
+
+// DMA path: send the front frame while decoding the next one into the back
+// buffer. The DMA is never left running when this returns, so the rest of the
+// code (static, OSD screens, power-off animation) can draw as usual.
+static void showFrameDMA(uint32_t audioFrame) {
+  if (!s_frontReady) {
+    // Pipeline empty (episode start or a failed read): fill it first.
+    if (!decodeInto(s_back, s_nextFrameToShow, audioFrame)) return;
+    s_back = 1 - s_back;
+    s_frontReady = true;
+  }
+
+  startPush((const uint16_t *)s_frames[1 - s_back].getPointer());
+  uint32_t nextIndex = s_nextFrameToShow + 1;
+  bool ok = decodeInto(s_back, nextIndex, audioFrame);
+  finishPush();
+
+  s_nextFrameToShow = nextIndex;
+  s_frontReady = ok;
+  if (ok) s_back = 1 - s_back;
+}
+#endif
 
 #ifdef M5STACK
 static void handleTouch() {
@@ -689,7 +807,14 @@ static void buildPlaylist(bool shuffle) {
 static void nextEpisode() {
   s_playlistIndex++;
   if (s_playlistIndex >= s_playlistSize) {
+    int last = s_playlist[s_playlistSize - 1];
     buildPlaylist(true);
+    // Don't repeat the episode that just played at the start of the new round
+    if (s_playlistSize > 1 && s_playlist[0] == last) {
+      int j = 1 + esp_random() % (s_playlistSize - 1);
+      s_playlist[0] = s_playlist[j];
+      s_playlist[j] = last;
+    }
   }
   s_channelNumber = s_playlistIndex + 1;
   playEpisode(s_playlist[s_playlistIndex]);
@@ -718,7 +843,7 @@ static void playEpisode(int index) {
   // Display.drawString("Open video...", 10, 80);
 
   s_episodeStartMs = millis();
-  s_batteryOsdEnd = millis() + 10000;  // Show battery for 10s at episode start
+  s_batteryOsdStart = millis();  // Battery OSD shows for BATTERY_OSD_MS
 
   // Stop audioTask from touching s_audio while we swap files.
   xSemaphoreTake(s_audioMutex, portMAX_DELAY);
@@ -739,7 +864,7 @@ static void playEpisode(int index) {
             s_video.sampleRate(), (unsigned)AUDIO_SAMPLE_RATE);
       s_audio.stop();
       Display.drawString("BAD AUDIO RATE", 10, 120);
-    } else if (VideoPlayer::hasAudio(videoPath)) {
+    } else if (VideoPlayer::hasAudio(s_episodes[index])) {
       // Display.drawString("Has audio", 10, 120);
       s_audio.playFile(audioPath);
       // Display.drawString("Audio OK", 10, 140);
@@ -755,7 +880,10 @@ static void playEpisode(int index) {
   s_nextFrameToShow = 0;
   s_currentEpisode = index;
   s_playing = true;
-  s_channelOsdEnd = millis() + CHANNEL_OSD_MS;
+  s_channelOsdStart = millis();
+#if DISPLAY_DMA
+  s_frontReady = false;
+#endif
 
   s_audioFinishedAt = 0;
   s_audioEndHandled = false;
@@ -854,29 +982,29 @@ static void showCRTOffAnimation() {
   Display.fillScreen(TFT_BLACK);
 }
 
-static void showChannelOSD(int channel) {
+static void showChannelOSD(Gfx &g, int channel) {
   char buf[16];
   snprintf(buf, sizeof(buf), "CH %02d", channel);
 
   int osdX = DISPLAY_WIDTH - 80;
-  Display.fillRect(osdX, 4, 76, 22, TFT_BLACK);
-  Display.drawRect(osdX, 4, 76, 22, TFT_WHITE);
-  Display.setTextSize(1);
-  Display.setTextColor(TFT_GREEN, TFT_BLACK);
-  Display.drawString(buf, osdX + 6, 8);
+  g.fillRect(osdX, 4, 76, 22, TFT_BLACK);
+  g.drawRect(osdX, 4, 76, 22, TFT_WHITE);
+  g.setTextSize(1);
+  g.setTextColor(TFT_GREEN, TFT_BLACK);
+  g.drawString(buf, osdX + 6, 8);
 }
 
-static void showBatteryOSD(const BatteryMonitor::State& bat) {
+static void showBatteryOSD(Gfx &g, const BatteryMonitor::State& bat) {
   if (!bat.valid) return;
 
   int x = 4, y = 4;
   int w = 24, h = 12;
 
-  Display.fillRect(x - 1, y - 1, w + 6, h + 2, TFT_BLACK);
+  g.fillRect(x - 1, y - 1, w + 6, h + 2, TFT_BLACK);
 
   // Battery shell
-  Display.drawRect(x, y, w, h, TFT_WHITE);
-  Display.fillRect(x + w, y + 3, 3, h - 6, TFT_WHITE);
+  g.drawRect(x, y, w, h, TFT_WHITE);
+  g.fillRect(x + w, y + 3, 3, h - 6, TFT_WHITE);
 
   // Fill level
   int fillW = (w - 4) * bat.percentage / 100;
@@ -885,13 +1013,13 @@ static void showBatteryOSD(const BatteryMonitor::State& bat) {
   else if (bat.percentage <= 50) color = TFT_YELLOW;
 
   if (fillW > 0) {
-    Display.fillRect(x + 2, y + 2, fillW, h - 4, color);
+    g.fillRect(x + 2, y + 2, fillW, h - 4, color);
   }
 
   // Charging indicator
   if (bat.charging) {
-    Display.setTextColor(TFT_YELLOW, TFT_BLACK);
-    Display.setTextSize(1);
-    Display.drawString("C", x + w + 6, y);
+    g.setTextColor(TFT_YELLOW, TFT_BLACK);
+    g.setTextSize(1);
+    g.drawString("C", x + w + 6, y);
   }
 }

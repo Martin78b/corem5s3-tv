@@ -1,6 +1,7 @@
 #include "video_player.h"
 
 uint16_t* VideoPlayer::_drawTarget = nullptr;
+void (*VideoPlayer::_drawHook)() = nullptr;
 
 VideoPlayer::VideoPlayer()
   : _frameCount(0), _currentFrame(0), _fps(VIDEO_FPS), _sampleRate(AUDIO_SAMPLE_RATE),
@@ -92,14 +93,14 @@ uint32_t VideoPlayer::readNextFrame() {
   return frameSize;
 }
 
-bool VideoPlayer::decodeFrame(uint16_t* framebuffer) {
+bool VideoPlayer::decodeFrame(uint16_t* framebuffer, bool bigEndian) {
   _drawTarget = framebuffer;
 
   if (!_jpeg.openRAM(_jpegBuf, _currentFrameSize, JPEGDraw)) {
     return false;
   }
 
-  _jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
+  _jpeg.setPixelType(bigEndian ? RGB565_BIG_ENDIAN : RGB565_LITTLE_ENDIAN);
   _jpeg.decode(0, 0, 0);
   _jpeg.close();
 
@@ -136,6 +137,7 @@ int VideoPlayer::JPEGDraw(JPEGDRAW* draw) {
     dst += DISPLAY_WIDTH;
     src += draw->iWidth;
   }
+  if (_drawHook) _drawHook();
   return 1;
 }
 
@@ -150,25 +152,33 @@ int VideoPlayer::scanEpisodes(VideoFile* episodes, int maxEpisodes) {
     const char* name = entry.name();
     if (!entry.isDirectory()) {
       size_t len = strlen(name);
-      if (len > 6 && strcasecmp(name + len - 6, MJPEG_EXT) == 0) {
-        snprintf(episodes[count].path, sizeof(episodes[count].path), "/%s", name);
-        strncpy(episodes[count].pcmPath, episodes[count].path, sizeof(episodes[count].pcmPath));
-        char* dot = strrchr(episodes[count].pcmPath, '.');
-        if (dot) strcpy(dot, PCM_EXT);
-        count++;
+      const size_t extLen = sizeof(MJPEG_EXT) - 1;
+      if (len > extLen && strcasecmp(name + len - extLen, MJPEG_EXT) == 0) {
+        VideoFile& ep = episodes[count];
+        // "/<base>.mjpeg" and "/<base>.pcm"; skip names that would be truncated
+        int baseLen = (int)(len - extLen);
+        int n1 = snprintf(ep.path, sizeof(ep.path), "/%s", name);
+        int n2 = snprintf(ep.pcmPath, sizeof(ep.pcmPath), "/%.*s%s", baseLen, name, PCM_EXT);
+        if (n1 >= (int)sizeof(ep.path) || n2 >= (int)sizeof(ep.pcmPath)) {
+          log_w("Skipping %s: file name too long (max %d chars)", name, EPISODE_PATH_MAX - 2);
+        } else {
+          count++;
+        }
       }
     }
     entry.close();
   }
   root.close();
+
+  // FAT returns directory order; sort so episode indices are stable
+  qsort(episodes, count, sizeof(VideoFile), [](const void* a, const void* b) {
+    return strcasecmp(((const VideoFile*)a)->path, ((const VideoFile*)b)->path);
+  });
+
   log_i("Found %d episodes", count);
   return count;
 }
 
-bool VideoPlayer::hasAudio(const char* videoPath) {
-  char pcmPath[64];
-  strncpy(pcmPath, videoPath, 64);
-  char* dot = strrchr(pcmPath, '.');
-  if (dot) strcpy(dot, PCM_EXT);
-  return SD_FS.exists(pcmPath);
+bool VideoPlayer::hasAudio(const VideoFile& episode) {
+  return SD_FS.exists(episode.pcmPath);
 }

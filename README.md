@@ -282,7 +282,8 @@ Internal SRAM (512 KB):
 **"NO .mjpeg FILES" on boot:**
 - Run the conversion tool
 - Copy files to SD card root (not in a subfolder)
-- Check file extensions are lowercase `.mjpeg`
+- Check file extensions are `.mjpeg`
+- File names longer than 94 characters are skipped (see the serial log)
 
 **Video stuttering:**
 - Re-convert with `--fps 15` (or lower)
@@ -301,6 +302,9 @@ Internal SRAM (512 KB):
 **Display corruption (M5Stack only):**
 - The SD card and display share SPI bus and GPIO35 — this is normal
 - M5GFX handles the pin sharing, but if you see corruption, try lowering SD_SPI_FREQ in config.h
+
+**Display glitches or tearing (Waveshare):**
+- Frames are sent by DMA while the next one decodes. To rule it out, build with `-DDISPLAY_DMA=0` (or set it in config.h) to use the blocking push
 
 **Touch not responding (Waveshare):**
 - Check TOUCH_RST (GPIO47) and TOUCH_INT (GPIO48) are properly connected
