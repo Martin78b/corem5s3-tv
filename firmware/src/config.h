@@ -127,6 +127,14 @@
 #define MENU_TIMEOUT_MS 10000       // Menu closes after this long without input
 #define SETTINGS_SAVE_DELAY_MS 5000 // Save gesture volume/brightness once they settle
 
+// ── Auto power-off (sleep timer + inactivity) ──
+#define AUTO_OFF_WARN_MS 60000      // On-screen warning before powering off
+// Length of a "minute" in the sleep/inactivity timers. Build with e.g.
+// -DAUTO_OFF_MINUTE_MS=10000 to test them quickly (the warning stays 60 s).
+#ifndef AUTO_OFF_MINUTE_MS
+#define AUTO_OFF_MINUTE_MS 60000UL
+#endif
+
 // ── Firmware info (shown under the boot logo) ──
 // FW_VERSION / FW_GIT_HASH can be injected with -D at build time (HANDOFF F7.2)
 #ifndef FW_VERSION

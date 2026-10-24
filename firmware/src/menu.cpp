@@ -1,5 +1,7 @@
 #include "menu.h"
 
+#include "auto_off.h"
+
 #ifdef WAVESHARE_154
 
 // ── Layout (240x240; text size 2 = 12x16 px per char) ──
@@ -22,6 +24,14 @@ void SettingsMenu::addRange(const char *label, uint8_t *value, uint8_t min,
                       nullptr, suffix, onChange, Action::NONE};
 }
 
+void SettingsMenu::addEnum(const char *label, uint8_t *value,
+                           const char *const *options, uint8_t count,
+                           void (*onChange)(uint8_t)) {
+  if (_count >= MAX_ITEMS) return;
+  _items[_count++] = {label, ItemType::ENUM, value, 0, (uint8_t)(count - 1), 0,
+                      options, nullptr, onChange, Action::NONE};
+}
+
 void SettingsMenu::addAction(const char *label, Action action) {
   if (_count >= MAX_ITEMS) return;
   _items[_count++] = {label, ItemType::ACTION, nullptr, 0, 0, 0,
@@ -31,10 +41,14 @@ void SettingsMenu::addAction(const char *label, Action action) {
 void SettingsMenu::open(Settings &settings, const Callbacks &cb) {
   _cb = cb;
   _count = 0;
-  // Items for F2 (sleep / idle off), F3 (rotation) and F4 (WiFi) are added
-  // here when those features exist; Settings already stores their values.
+  // Items for F3 (rotation) and F4 (WiFi) are added here when those
+  // features exist; Settings already stores their values.
   addRange("VOLUMEN", &settings.volumePct, 0, 100, 10, "%", cb.applyVolume);
   addRange("BRILLO", &settings.brightnessPct, 10, 100, 10, "%", cb.applyBrightness);
+  addEnum("APAGADO", cb.sleepOption, AutoOff::SLEEP_LABELS,
+          AutoOff::SLEEP_OPTION_COUNT, cb.applySleep);
+  addEnum("INACTIVIDAD", &settings.idleOffOption, AutoOff::IDLE_LABELS,
+          AutoOff::IDLE_OPTION_COUNT, cb.applyIdle);
   addAction("INFO", Action::INFO);
   addAction("SALIR", Action::EXIT);
 
@@ -199,7 +213,7 @@ void SettingsMenu::drawInfo() {
   InfoData info = {};
   if (_cb.fillInfo) _cb.fillInfo(info);
 
-  const int lines = 4;
+  const int lines = 5;
   int h = TITLE_H + 6 + lines * ROW_H + FOOTER_H + 4;
   drawFrame(h, "INFO");
 
@@ -245,6 +259,12 @@ void SettingsMenu::drawInfo() {
   snprintf(buf, sizeof(buf), "%d", info.episodes);
   Display.setTextDatum(MR_DATUM);
   Display.drawString(buf, BOX_X + BOX_W - PAD, y);
+  y += ROW_H;
+
+  Display.setTextDatum(ML_DATUM);
+  Display.drawString("APAGADO", BOX_X + PAD, y);
+  Display.setTextDatum(MR_DATUM);
+  Display.drawString(info.sleep, BOX_X + BOX_W - PAD, y);
 
   Display.setTextDatum(TL_DATUM);
   drawFooter(h, "Toca o pulsa para volver");

@@ -1,7 +1,7 @@
 # Handoff: revisión de código (2026-10-17)
 
 Hallazgos de una revisión estática del firmware en la rama `feature/dual-display-support`
-(commit `7947d0a`). **Nada está aplicado ni probado en hardware.** Cada ítem tiene un ID
+(commit `7947d0a`). El estado de cada ítem figura en su línea ✅ / 🔧. Cada ítem tiene un ID
 para poder pedir "haz B1, B3 y P1" en una sesión futura.
 
 Antes de aplicar un ítem, verificar que las líneas citadas siguen siendo las mismas
@@ -32,6 +32,7 @@ Antes de aplicar un ítem, verificar que las líneas citadas siguen siendo las m
   **Fix mínimo:** meter `playFilled()` + `fillNext()` dentro del mutex y marcar los flags como atómicos.
   **Fix ideal:** que solo `audioTask` toque `AudioPlayer`; `loop()` le manda comandos (play/stop) por una cola FreeRTOS.
   ✅ Aplicado (2026-10-19), variante intermedia: nuevo `s_audioMutex` que protege todo `AudioPlayer` (audioTask y `playEpisode`); orden de locks audio → SD. `playFilled()` ya no toca la SD (el cierre al EOF lo hace `fillNext()`/`playFile()` con el mutex SD). `isPlaying()` no lee `_file`. `s_playing` y `_playing` son `std::atomic<bool>`. `s_video.close()` del loop ahora va con el mutex SD. La cola de comandos (fix ideal) queda para P3.
+  🔧 Probado en hardware (2026-10-23, Waveshare): OK.
 
 - [x] **B4. Debounce roto en botones BOOT/+** — `firmware/src/main.cpp:379-404`
   Si se suelta antes de 50 ms, `bootPressMs`/`plusPressMs` no vuelven a 0 → la siguiente
@@ -75,9 +76,11 @@ Antes de aplicar un ítem, verificar que las líneas citadas siguen siendo las m
 - [x] **R3. Descarte de frames**: si el video va atrasado más de 1–2 frames respecto al audio,
   leer el frame sin decodificar (`main.cpp:454-472`).
   ✅ Aplicado (2026-10-19): si el video va más de `VIDEO_MAX_LAG_FRAMES` (2) atrás del audio, se leen y descartan frames sin decodificar, como máximo `VIDEO_MAX_SKIP_PER_LOOP` (8) por vuelta.
+  🔧 Probado en hardware (2026-10-23, Waveshare): OK.
 - [x] **R4. Offset de sincronía**: `totalSamples()` cuenta muestras encoladas, no reproducidas →
   video adelantado ~90–180 ms. Restar la latencia de DMA + chunk.
   ✅ Aplicado (2026-10-19): `AudioPlayer::playedSamples()`. Waveshare/genérica: muestras entregadas a I2S (contador atómico por bloque de 256 en `I2SSpeaker`) menos el anillo DMA (`AUDIO_DMA_BUF_COUNT * AUDIO_DMA_BUF_LEN`). M5: interpolación por tiempo dentro del chunk en curso. Además el reloj ahora avanza en pasos de ~6 ms en vez de 93 ms.
+  🔧 Probado en hardware (2026-10-23, Waveshare): OK.
 - [x] **R5. Overflow de `millis()`**: comparaciones como `nowMs < s_channelOsdEnd` (`main.cpp:486, 492`,
   `gesture_control.cpp:325-330`). Usar `(int32_t)(end - now) > 0`.
   ✅ Aplicado (2026-10-19): los OSD (canal, batería, batería baja, volumen/brillo) guardan el instante de inicio y comparan `now - start < duración`. Se usó eso en vez de `(int32_t)(end - now) > 0`, porque con fines viejos esta última vuelve a dar verdadero tras ~24 días.
@@ -90,9 +93,10 @@ Antes de aplicar un ítem, verificar que las líneas citadas siguen siendo las m
 - [ ] **R8. ES8311** (`firmware/src/es8311.cpp`): no se revisa ningún retorno de `write_reg`;
   `es8311_set_volume(255)` se llama dos veces (`main.cpp:269` y `:324`).
   ⏳ Parcial (2026-10-19, con P2): se eliminó la segunda llamada `es8311_set_volume(255)`, porque ahora pisaría el volumen inicial. Falta revisar los retornos de `write_reg`.
-- [ ] **R9. Verificar** `BTN_PWR` (GPIO5): se configura como `OUTPUT HIGH` (`main.cpp:154-155`) y luego se lee
+- [x] **R9. Verificar** `BTN_PWR` (GPIO5): se configura como `OUTPUT HIGH` (`main.cpp:154-155`) y luego se lee
   con `gpio_get_level`. Confirmar en hardware/esquemático que la lectura es fiable (si el input no
   está habilitado podría leer siempre 0).
+  🔧 Verificado en hardware (2026-10-23, Waveshare): el PWR corto abre el menú, así que la lectura con `gpio_get_level` funciona.
 
 ## P — Rendimiento
 
@@ -101,6 +105,7 @@ Antes de aplicar un ítem, verificar que las líneas citadas siguen siendo las m
   Solo aplica a TFT_eSPI (Waveshare/genérica); M5Unified tiene su propio mecanismo.
   ✅ Aplicado (2026-10-19), solo Waveshare (`DISPLAY_DMA`, se desactiva con 0): dos `TFT_eSprite` de 240×240 en PSRAM (creados antes de `initDMA()`), decodificados en big-endian. El OSD se dibuja dentro del frame, sin parpadeo. El frame N se envía en bandas de 68 filas (límite de 0x4000 px por DMA de TFT_eSPI) mediante un bounce buffer interno; `JPEGDraw` alimenta la siguiente banda mientras decodifica N+1. El DMA nunca queda en vuelo al salir de `showFrameDMA()`. Genérica: queda bloqueante porque la SD podría compartir el host SPI. M5: sin cambios.
   ⚠️ 2026-10-19: la compilación usa `dio_qspi` (`board_build.psram_type = opi` no es una opción de PlatformIO), así que la PSRAM octal no se detecta y el camino DMA cae al envío bloqueante. Se probó `board_build.arduino.memory_type = dio_opi` y la placa quedó en **bucle de reinicio tras el logo** → revertido. Pendiente: investigar la configuración correcta de PSRAM (¿`qio_opi`? ¿flash real de 16 MB?) con el log serie del crash.
+  ❌ 2026-10-23, intento **revertido** (el código volvió a `49d11d3`): con `board_build.arduino.memory_type = qio_opi` + `flash_mode = qio` se detectaban 8 MB de PSRAM y 16 MB de flash, pero tras un rato de reproducción la imagen se trababa. El DMA, al correr por primera vez, crasheó en `dma_end_callback()` de TFT_eSPI 2.5.43 (`SPI_DMA_CONF_REG(spi_host)` con `SPI2_HOST`=1 escribe en 0x30 en el S3); parchearlo a `SPI_PORT` evitó el crash, pero la pantalla quedó en el logo. Upstream usa `SPI_DMA_CONF_REG(DMA_CHANNEL)`. Con el DMA apagado y la PSRAM activa, el indicador de carga "C" tampoco aparecía (GPIO3 leía 1); con `49d11d3` sí aparece. Si se retoma: un cambio por vez y una prueba larga de reproducción.
 - [x] **P2. Audio mono** (`firmware/src/audio_hal.h:56-79`): evitar duplicar a estéreo
   (`I2S_CHANNEL_FMT_ONLY_LEFT` o mono en el ES8311) y mover el volumen al DAC (reg 0x32) o usar
   curva logarítmica en vez de `*v/255` lineal.
@@ -178,6 +183,7 @@ F1 conviene hacerlo junto con **B3** y **L7**, porque requiere reestructurar `lo
   - **Recomendado:** pulsación **corta** de PWR (hoy libre; la larga sigue apagando).
   - Alternativas: mantener el dedo 1 s en la pantalla, o doble tap.
   ✅ Aplicado (2026-10-19): PWR corto (≥ 50 ms y < 3 s), solo mientras se reproduce un episodio.
+  🔧 Probado en hardware (2026-10-23, Waveshare): el menú abre y funciona.
 - [x] **F1.4 Navegación** (soportar ambas):
   - Botones: BOOT = bajar, `+` = cambiar valor, PWR corto = atrás/salir.
   - Táctil: swipe arriba/abajo = moverse, tap = seleccionar/cambiar.
@@ -191,6 +197,7 @@ F1 conviene hacerlo junto con **B3** y **L7**, porque requiere reestructurar `lo
 - [x] **F1.6 Al pausar**: detener el audio (`s_audio.stop()` o una pausa real) y guardar la posición
   de video/audio para retomar sin desincronía.
   ✅ Aplicado (2026-10-19): `AudioPlayer::pause()/resume()` mantiene archivo y posición. Se descarta lo que había en el anillo DMA (< 100 ms), pero `playedSamples()` sigue coherente, así que el video retoma en sincronía. El video simplemente no avanza.
+  🔧 Probado en hardware (2026-10-23, Waveshare): la pausa funciona.
 - [x] **F1.7 Gestos según el estado (sin conflicto con volumen/brillo)**:
   ✅ Aplicado (2026-10-19): `touchTask` detecta el cambio de estado y llama `setMenuMode()` (resetea a IDLE y adopta los niveles del menú). En el menú, cada swipe produce un único `SWIPE_*` por una cola hacia `loop()`, que es el único que dibuja; volumen y brillo por gesto quedan desactivados. Además, el volumen y brillo cambiados por gesto se guardan en NVS 5 s después del último cambio.
 
@@ -227,24 +234,33 @@ CONFIGURACIÓN
 
 ## F2 — Temporizador de apagado
 
-- [ ] **F2.1 Sleep timer** (estilo TV): cuenta desde que se activa. Valores: Off, 15, 30, 60, 120, 240 min.
+- [x] **F2.1 Sleep timer** (estilo TV): cuenta desde que se activa. Valores: Off, 15, 30, 60, 120, 240 min.
   **No** se guarda entre reinicios.
-- [ ] **F2.2 "Al terminar el episodio"**: apagar cuando termina el episodio actual
+- [x] **F2.2 "Al terminar el episodio"**: apagar cuando termina el episodio actual
   (enganchar en la transición a `nextEpisode()` de `loop()`).
-- [ ] **F2.3 Apagado por inactividad**: se reinicia con cada toque, swipe o botón. **Sí** se guarda en NVS.
+- [x] **F2.3 Apagado por inactividad**: se reinicia con cada toque, swipe o botón. **Sí** se guarda en NVS.
   Valores: Off / 1 h / 2 h / 4 h, con **2 h por defecto**. Son valores largos a propósito: ver la TV es pasivo,
   y con 15–30 min se apagaría en mitad de un episodio aunque alguien esté mirando.
   Propósito: proteger la batería si se queda olvidado.
-- [ ] **F2.4 Aviso previo** (común a los dos): OSD 60 s antes, "Apagando en 1 min — toca para cancelar".
+- [x] **F2.4 Aviso previo** (común a los dos): OSD 60 s antes, "Apagando en 1 min — toca para cancelar".
   - Si lo dispara la **inactividad**: tocar cancela y reinicia el contador.
   - Si lo dispara el **sleep timer**: tocar desactiva el timer (o lo extiende 15 min; decidir al implementarlo).
-- [ ] **F2.7 Convivencia**: ambos corren en paralelo y gana el que vence primero. En modo USB (F6) o con el cargador
+- [x] **F2.7 Convivencia**: ambos corren en paralelo y gana el que vence primero. En modo USB (F6) o con el cargador
   conectado, pausar el contador de inactividad. El sleep timer se respeta siempre.
-- [ ] **F2.8 Indicador**: con el sleep timer activo, mostrar el tiempo restante (p. ej. "⏾ 25m") junto al OSD
+- [x] **F2.8 Indicador**: con el sleep timer activo, mostrar el tiempo restante (p. ej. "⏾ 25m") junto al OSD
   de canal/batería, y en el menú.
-- [ ] **F2.5 Ejecución**: reutilizar `showCRTOffAnimation()` + `digitalWrite(PWR_HOLD, LOW)` +
+- [x] **F2.5 Ejecución**: reutilizar `showCRTOffAnimation()` + `digitalWrite(PWR_HOLD, LOW)` +
   `esp_deep_sleep_start()`. Hacerlo de paso con D2/L4 (unificar el apagado en una sola función).
-- [ ] **F2.6** Usar comparaciones seguras ante overflow de `millis()` (ver R5).
+- [x] **F2.6** Usar comparaciones seguras ante overflow de `millis()` (ver R5).
+
+  ✅ **F2 aplicado (2026-10-23), sin probar en hardware.** Módulo `auto_off.h/.cpp` (solo cuenta tiempo; `main.cpp` dibuja y apaga).
+  - Menú: `APAGADO` (NO/15m/30m/60m/2h/4h/FIN EP, no se guarda) e `INACTIVIDAD` (NO/1h/2h/4h, en NVS; `Settings::idleOffHours` pasó a `idleOffOption`, índice; el valor 2 ya guardado sigue significando 2 h).
+  - F2.4: con el aviso en pantalla, cualquier toque o botón lo cancela y se consume (no cambia de canal ni abre el menú). Si era el sleep timer, **se desactiva** (no se extiende). Con el menú abierto, los toques solo cuentan como actividad.
+  - F2.2: "FIN EP" apaga al terminar el episodio, sin aviso previo (solo el indicador `Z FIN`).
+  - F2.7: la inactividad se congela mientras `CHG_STAT` indica carga. Con la batería llena y USB conectado el ETA6098 suelta STAT, así que en ese caso **sí** cuenta.
+  - F2.8: `Z 25m` junto al icono de batería (cuando este se muestra) y una línea `APAGADO` en INFO.
+  - F2.5: `powerOff()` única, usada también por PWR largo. Con USB conectado, el deep sleep no tiene fuente de despertar (igual que antes con PWR largo): hay que pulsar RESET o reconectar.
+  - Para probar rápido: compilar con `-DAUTO_OFF_MINUTE_MS=10000` (1 "minuto" = 10 s; el aviso sigue siendo de 60 s).
 
 ## F3 — Rotación automática por acelerómetro
 

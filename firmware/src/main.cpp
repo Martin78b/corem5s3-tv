@@ -15,6 +15,7 @@
 #include "display_hal.h"
 #include "video_player.h"
 #ifdef WAVESHARE_154
+#include "auto_off.h"
 #include "backlight.h"
 #include "es8311.h"
 #include "gesture_control.h"
@@ -72,6 +73,10 @@ static Settings s_settings;       // Live values (menu edits them in place)
 static Settings s_savedSettings;  // What is in NVS
 // Gestures recognized while the menu is open, from touchTask to loop()
 static QueueHandle_t s_uiQueue = NULL;
+// Bumped by touchTask on every finger-down, so loop() sees touch activity
+static std::atomic<uint32_t> s_touchCount{0};
+static uint8_t s_sleepMenuOption = AutoOff::SLEEP_OFF;  // Edited by the menu
+static AutoOff::Status s_autoOff = {AutoOff::Source::NONE, 0, false};
 #if GESTURE_DEBUG
 static struct { bool ok; uint8_t finger; int16_t x, y; } s_touchDbg = { false, 0, -1, -1 };
 #endif
@@ -129,6 +134,8 @@ static void openMenu();
 static void closeMenu();
 static void tickMenu(bool pwrShort, bool boot, bool plus);
 static void persistGestureLevels();
+static void tickAutoOff(bool &pwrShort, bool &boot, bool &plus);
+static void showAutoOffOSD(Gfx &g, bool besideBattery);
 static void i2c_scan();
 #endif
 static void formatVersion(char *buf, size_t len);
@@ -190,7 +197,17 @@ static void touchTask(void *arg) {
   }
 }
 
-// PWR button (GPIO5): long press = CRT off animation + deep sleep.
+// CRT off animation, release the power latch (GPIO2) and deep sleep. On USB
+// power the board stays on, so deep sleep is what actually stops it.
+static void powerOff() {
+  s_appState = AppState::POWER_OFF;
+  showCRTOffAnimation();
+  digitalWrite(2, LOW);
+  delay(100);
+  esp_deep_sleep_start();
+}
+
+// PWR button (GPIO5): long press = power off.
 // Returns true on a short press (released before PWR_LONG_PRESS_MS).
 static bool pollPowerButton() {
   static uint32_t pwrPressStart = 0;
@@ -200,11 +217,7 @@ static bool pollPowerButton() {
     if (pwrPressStart == 0) {
       pwrPressStart = now ? now : 1;
     } else if (now - pwrPressStart > PWR_LONG_PRESS_MS) {
-      s_appState = AppState::POWER_OFF;
-      showCRTOffAnimation();
-      digitalWrite(2, LOW);
-      delay(100);
-      esp_deep_sleep_start();
+      powerOff();
     }
     return false;
   }
@@ -428,6 +441,8 @@ void setup() {
   s_gesture.begin(&s_audio, s_settings.volumePct, s_settings.brightnessPct);
   s_audio.setVolume(GestureController::pctToHwVolume(s_settings.volumePct));
   s_uiQueue = xQueueCreate(8, sizeof(GestureResult));
+  AutoOff::setIdle(s_settings.idleOffOption);
+  AutoOff::activity(millis());
 #endif
 
   s_episodeCount = VideoPlayer::scanEpisodes(s_episodes, MAX_EPISODES);
@@ -469,6 +484,7 @@ void loop() {
     bool pwrShort = pollPowerButton();
     bool boot = buttonPressed(bootBtn);
     bool plus = buttonPressed(plusBtn);
+    tickAutoOff(pwrShort, boot, plus);
 
     if (s_appState == AppState::MENU) {
       tickMenu(pwrShort, boot, plus);
@@ -507,6 +523,9 @@ void loop() {
 
     if (millis() - s_audioFinishedAt > 200) {
       if (!s_audio.isPlaying()) {
+#ifdef WAVESHARE_154
+        if (AutoOff::offAtEpisodeEnd()) powerOff();
+#endif
         showTVStatic(EPISODE_STATIC_MS);
         nextEpisode();
         s_audioFinishedAt = 0;
@@ -598,13 +617,15 @@ static void composeOSD(Gfx &g) {
 
   // Battery OSD: show at episode start, or always when <= 20%
   BatteryMonitor::State bat = BatteryMonitor::update();
-  if (nowMs - s_batteryOsdStart < BATTERY_OSD_MS ||
-      (bat.valid && bat.percentage <= 20)) {
+  bool batteryShown = nowMs - s_batteryOsdStart < BATTERY_OSD_MS ||
+                      (bat.valid && bat.percentage <= 20);
+  if (batteryShown) {
     showBatteryOSD(g, bat);
   }
 
 #ifdef WAVESHARE_154
   s_gesture.renderOSD(g);
+  showAutoOffOSD(g, batteryShown);
 #endif
 
   // Low battery warning: once per discharge, re-armed when charging.
@@ -782,6 +803,9 @@ static GestureResult readTouch() {
   // reg 0x00 = status, 0x01 = GestureID, 0x02 = FingerNum,
   // 0x03 = XH (nibble), 0x04 = XL, 0x05 = YH (nibble), 0x06 = YL
   uint8_t fingerCount = data[2] & 0x0F;
+  static bool fingerDown = false;
+  if (fingerCount > 0 && !fingerDown) s_touchCount++;
+  fingerDown = fingerCount > 0;
   GESTURE_LOG("raw f=%d g=0x%02X r0=0x%02X r3=0x%02X r4=0x%02X r5=0x%02X r6=0x%02X",
               fingerCount, data[1], data[0], data[3], data[4], data[5], data[6]);
 
@@ -818,6 +842,21 @@ static void menuFillInfo(SettingsMenu::InfoData &info) {
   info.batteryPct = bat.percentage;
   info.batteryMv = bat.voltage_mv;
   info.charging = bat.charging;
+  uint32_t rem = AutoOff::sleepRemainingMs(millis());
+  if (rem) {
+    snprintf(info.sleep, sizeof(info.sleep), "%lum",
+             (unsigned long)((rem + AUTO_OFF_MINUTE_MS - 1) / AUTO_OFF_MINUTE_MS));
+  } else {
+    snprintf(info.sleep, sizeof(info.sleep), "%s",
+             AutoOff::SLEEP_LABELS[AutoOff::sleepOption()]);
+  }
+}
+
+static void menuApplySleep(uint8_t option) { AutoOff::setSleep(option, millis()); }
+
+static void menuApplyIdle(uint8_t option) {
+  AutoOff::setIdle(option);
+  AutoOff::activity(millis());
 }
 
 // Pauses playback and opens the menu over the frozen frame.
@@ -831,7 +870,9 @@ static void openMenu() {
 
   xQueueReset(s_uiQueue);
   s_appState = AppState::MENU;
-  s_menu.open(s_settings, {menuApplyVolume, menuApplyBrightness, menuFillInfo});
+  s_sleepMenuOption = AutoOff::sleepOption();  // A warning may have cleared it
+  s_menu.open(s_settings, {menuApplyVolume, menuApplyBrightness, menuFillInfo,
+                           &s_sleepMenuOption, menuApplySleep, menuApplyIdle});
 }
 
 // Saves what changed and resumes. The next video frame repaints the screen.
@@ -875,6 +916,65 @@ static void tickMenu(bool pwrShort, bool boot, bool plus) {
     return;
   }
   delay(10);
+}
+
+// Sleep timer + inactivity (F2). Called every loop() pass with the inputs of
+// that pass. While the warning is on screen, an input only cancels it: the
+// press is consumed so it does not also change channel or open the menu.
+static void tickAutoOff(bool &pwrShort, bool &boot, bool &plus) {
+  static uint32_t lastTouchCount = 0;
+  uint32_t now = millis();
+  uint32_t touches = s_touchCount;
+  bool touched = touches != lastTouchCount;
+  lastTouchCount = touches;
+
+  if (pwrShort || boot || plus || touched) {
+    if (s_autoOff.warning != AutoOff::Source::NONE &&
+        s_appState != AppState::MENU) {
+      AutoOff::cancelWarning(now);
+      pwrShort = boot = plus = false;
+    }
+    AutoOff::activity(now);
+  }
+
+  const BatteryMonitor::State &bat = BatteryMonitor::getState();
+  s_autoOff = AutoOff::tick(now, bat.valid && bat.charging);
+  if (s_autoOff.expired) powerOff();
+}
+
+// Sleep timer indicator beside the battery icon, and the power-off warning.
+static void showAutoOffOSD(Gfx &g, bool besideBattery) {
+  if (besideBattery) {
+    char buf[12] = "";
+    uint32_t rem = AutoOff::sleepRemainingMs(millis());
+    if (AutoOff::offAtEpisodeEnd()) {
+      snprintf(buf, sizeof(buf), "Z FIN");
+    } else if (rem) {
+      snprintf(buf, sizeof(buf), "Z %lum",
+               (unsigned long)((rem + AUTO_OFF_MINUTE_MS - 1) / AUTO_OFF_MINUTE_MS));
+    }
+    if (buf[0]) {
+      g.setTextSize(1);
+      g.setTextColor(TFT_CYAN, TFT_BLACK);
+      g.drawString(buf, 44, 6);
+    }
+  }
+
+  if (s_autoOff.warning == AutoOff::Source::NONE) return;
+  char line[24];
+  snprintf(line, sizeof(line), "APAGANDO EN %lus",
+           (unsigned long)((s_autoOff.remainingMs + 999) / 1000));
+  const int x = 8, y = 92, w = DISPLAY_WIDTH - 16, h = 52;
+  g.fillRect(x, y, w, h, TFT_BLACK);
+  g.drawRect(x, y, w, h, TFT_YELLOW);
+  g.setTextDatum(TC_DATUM);
+  g.setTextSize(2);
+  g.setTextColor(TFT_YELLOW, TFT_BLACK);
+  g.drawString(line, DISPLAY_WIDTH / 2, y + 8);
+  g.setTextSize(1);
+  g.setTextColor(TFT_WHITE, TFT_BLACK);
+  g.drawString("Toca o pulsa para cancelar", DISPLAY_WIDTH / 2, y + 34);
+  g.setTextDatum(TL_DATUM);
 }
 
 // Volume/brightness changed by swipes are saved once they stop changing, so

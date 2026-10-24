@@ -27,12 +27,16 @@ public:
     uint16_t batteryMv;
     bool batteryValid;
     bool charging;
+    char sleep[12];  // Sleep timer: "NO", "25m", "FIN EP"
   };
 
   struct Callbacks {
     void (*applyVolume)(uint8_t pct);      // Called on every volume change
     void (*applyBrightness)(uint8_t pct);  // Called on every brightness change
     void (*fillInfo)(InfoData &info);
+    uint8_t *sleepOption;                  // AutoOff::SLEEP_LABELS index
+    void (*applySleep)(uint8_t option);
+    void (*applyIdle)(uint8_t option);     // Settings::idleOffOption changed
   };
 
   void open(Settings &settings, const Callbacks &cb);
@@ -68,6 +72,8 @@ private:
 
   void addRange(const char *label, uint8_t *value, uint8_t min, uint8_t max,
                 uint8_t step, const char *suffix, void (*onChange)(uint8_t));
+  void addEnum(const char *label, uint8_t *value, const char *const *options,
+               uint8_t count, void (*onChange)(uint8_t));
   void addAction(const char *label, Action action);
   void change(Item &item, int dir, bool wrap);
   bool activate(Item &item);  // Returns false if the menu should close

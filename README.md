@@ -138,7 +138,9 @@ Short press **PWR** while an episode plays to open the menu. Video and audio pau
 |------|--------|
 | VOLUMEN | 0–100 % (steps of 10) |
 | BRILLO | 10–100 % (steps of 10) |
-| INFO | Firmware version, battery %, voltage, episode count |
+| APAGADO | Sleep timer: NO / 15m / 30m / 60m / 2h / 4h / FIN EP (when the current episode ends). Counts from when it is set; not saved |
+| INACTIVIDAD | Power off after this long without touches or button presses: NO / 1h / 2h / 4h (default 2h). Held while the battery is charging |
+| INFO | Firmware version, battery %, voltage, episode count, sleep time left |
 | SALIR | Close the menu |
 
 | Action | Buttons | Touch |
@@ -148,7 +150,9 @@ Short press **PWR** while an episode plays to open the menu. Video and audio pau
 | Open INFO / SALIR | + | Tap |
 | Back / close | PWR short press | — |
 
-The menu closes by itself after 10 s without input. Volume and brightness are saved to flash (NVS) and restored at boot, both when set in the menu and when changed with swipes (saved 5 s after the last change).
+The menu closes by itself after 10 s without input. Volume, brightness and INACTIVIDAD are saved to flash (NVS) and restored at boot; volume and brightness are saved both when set in the menu and when changed with swipes (saved 5 s after the last change).
+
+While the sleep timer runs, the time left (e.g. `Z 25m`) shows beside the battery icon. One minute before an automatic power-off, a warning appears: any touch or button cancels it (the inactivity count restarts, the sleep timer is switched off) without changing channel.
 
 ### Gesture Controls (Waveshare)
 
@@ -238,6 +242,7 @@ CoreM5S3-TV/
 │       ├── battery_monitor.h      # Battery voltage/percentage monitoring
 │       ├── gesture_control.h/.cpp # Touch gesture volume/brightness
 │       ├── menu.h/.cpp            # On-screen settings menu (Waveshare)
+│       ├── auto_off.h/.cpp        # Sleep timer and inactivity power-off (Waveshare)
 │       ├── settings.h/.cpp        # Settings persisted in NVS
 │       ├── es8311.h/.cpp          # ES8311 DAC driver (Waveshare)
 │       ├── logo_240.h             # Boot logo for 240x240 displays
@@ -284,7 +289,7 @@ Internal SRAM (512 KB):
 - [x] 1990s TV UI with OSD menus (settings menu on Waveshare)
 - [x] Simpsons intro boot animation (✓ — basic animation present)
 - [x] Volume control (via touch gestures on Waveshare)
-- [ ] Sleep timer
+- [x] Sleep timer and inactivity power-off (Waveshare)
 - [ ] Favorites list
 - [x] Shuffle mode (✓ — default)
 - [x] Support for Futurama + other shows
