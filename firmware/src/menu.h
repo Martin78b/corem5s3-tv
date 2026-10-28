@@ -37,6 +37,7 @@ public:
     uint8_t *sleepOption;                  // AutoOff::SLEEP_LABELS index
     void (*applySleep)(uint8_t option);
     void (*applyIdle)(uint8_t option);     // Settings::idleOffOption changed
+    void (*enterUsbMode)();                // Requests entering USB MSC mode
   };
 
   void open(Settings &settings, const Callbacks &cb);
@@ -47,7 +48,7 @@ public:
 
 private:
   enum class ItemType : uint8_t { RANGE, ENUM, ACTION };
-  enum class Action : uint8_t { NONE, INFO, EXIT };
+  enum class Action : uint8_t { NONE, USB_MODE, INFO, EXIT };
 
   struct Item {
     const char *label;

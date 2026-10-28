@@ -139,7 +139,8 @@ Short press **PWR** while an episode plays to open the menu. Video and audio pau
 | VOLUMEN | 0–100 % (steps of 10) |
 | BRILLO | 10–100 % (steps of 10) |
 | APAGADO | Sleep timer: NO / 15m / 30m / 60m / 2h / 4h / FIN EP (when the current episode ends). Counts from when it is set; not saved |
-| INACTIVIDAD | Power off after this long without touches or button presses: NO / 1h / 2h / 4h (default 2h). Held while the battery is charging |
+| INACTIVIDAD | Power off after this long without touches or button presses: NO / 1h / 2h / 4h (default 2h). Held while the battery is charging or in USB mode |
+| MODO USB | Unmounts the SD card from the firmware and exposes it to a connected PC as a USB Mass Storage drive |
 | INFO | Firmware version, battery %, voltage, episode count, sleep time left |
 | SALIR | Close the menu |
 
@@ -147,12 +148,20 @@ Short press **PWR** while an episode plays to open the menu. Video and audio pau
 |--------|---------|-------|
 | Move | BOOT = down | Swipe up / down |
 | Change value | + (wraps around) | Swipe left / right, or tap |
-| Open INFO / SALIR | + | Tap |
+| Open MODO USB / INFO / SALIR | + | Tap |
 | Back / close | PWR short press | — |
 
 The menu closes by itself after 10 s without input. Volume, brightness and INACTIVIDAD are saved to flash (NVS) and restored at boot; volume and brightness are saved both when set in the menu and when changed with swipes (saved 5 s after the last change).
 
 While the sleep timer runs, the time left (e.g. `Z 25m`) shows beside the battery icon. One minute before an automatic power-off, a warning appears: any touch or button cancels it (the inactivity count restarts, the sleep timer is switched off) without changing channel.
+
+### USB Mass Storage Mode (Waveshare)
+
+When you plug the Waveshare into a PC (a wall charger does not trigger this), an on-screen prompt (`PC DETECTADA · Modo USB? Toca la pantalla`) appears for 8 seconds:
+- **Tap the screen** while the prompt is visible — or open **Settings Menu → MODO USB** at any time — to enter USB mode.
+- Playback stops, the firmware unmounts the SD card (`SD_MMC.end()`), dims the backlight to 20%, and exposes the microSD card to the PC as a standard USB Mass Storage drive (`CoreTV SD Card`). Outside USB mode, the LUN reports "medium not present" so the PC and the firmware never touch the FAT32 filesystem at the same time.
+- **Eject the drive from the PC** (or unplug the USB cable, or short-press **PWR** once transfers are idle) to leave USB mode: the firmware remounts the SD card, rescans `.mjpeg` episodes, rebuilds the playlist, and resumes playback.
+- **Transfer speed**: the ESP32-S3 native USB OTG port runs at USB Full Speed (12 Mbps), which yields ~0.6–1 MB/s in practice (~2–3 minutes for a 100 MB episode). For bulk initial loads of many gigabytes, a dedicated SD card reader is faster; USB mode is ideal for adding or replacing a few episodes without removing the card.
 
 ### Gesture Controls (Waveshare)
 
@@ -243,6 +252,7 @@ CoreM5S3-TV/
 │       ├── gesture_control.h/.cpp # Touch gesture volume/brightness
 │       ├── menu.h/.cpp            # On-screen settings menu (Waveshare)
 │       ├── auto_off.h/.cpp        # Sleep timer and inactivity power-off (Waveshare)
+│       ├── usb_msc.h/.cpp         # USB Mass Storage mode for SD card (Waveshare)
 │       ├── settings.h/.cpp        # Settings persisted in NVS
 │       ├── es8311.h/.cpp          # ES8311 DAC driver (Waveshare)
 │       ├── logo_240.h             # Boot logo for 240x240 displays

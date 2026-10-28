@@ -7,10 +7,9 @@
 // ── Layout (240x240; text size 2 = 12x16 px per char) ──
 static const int BOX_X = 12;
 static const int BOX_W = DISPLAY_WIDTH - 2 * BOX_X;
-static const int BOX_Y = 24;
-static const int TITLE_H = 28;
-static const int ROW_H = 26;
-static const int FOOTER_H = 18;
+static const int TITLE_H = 26;
+static const int ROW_H = 24;
+static const int FOOTER_H = 16;
 static const int PAD = 10;
 
 static uint16_t green() { return TFT_GREEN; }
@@ -49,6 +48,7 @@ void SettingsMenu::open(Settings &settings, const Callbacks &cb) {
           AutoOff::SLEEP_OPTION_COUNT, cb.applySleep);
   addEnum("INACTIVIDAD", &settings.idleOffOption, AutoOff::IDLE_LABELS,
           AutoOff::IDLE_OPTION_COUNT, cb.applyIdle);
+  addAction("MODO USB", Action::USB_MODE);
   addAction("INFO", Action::INFO);
   addAction("SALIR", Action::EXIT);
 
@@ -129,6 +129,9 @@ void SettingsMenu::change(Item &item, int dir, bool wrap) {
 
 bool SettingsMenu::activate(Item &item) {
   switch (item.action) {
+    case Action::USB_MODE:
+      if (_cb.enterUsbMode) _cb.enterUsbMode();
+      return false;
     case Action::INFO:
       _infoPage = true;
       return true;
@@ -148,24 +151,26 @@ void SettingsMenu::formatValue(const Item &item, char *buf, size_t len) {
   }
 }
 
-static void drawFrame(int h, const char *title) {
-  Display.fillRect(BOX_X, BOX_Y, BOX_W, h, TFT_BLACK);
-  Display.drawRect(BOX_X, BOX_Y, BOX_W, h, green());
-  Display.drawRect(BOX_X + 1, BOX_Y + 1, BOX_W - 2, h - 2, green());
+static int drawFrame(int h, const char *title) {
+  int boxY = (DISPLAY_HEIGHT - h) / 2;
+  Display.fillRect(BOX_X, boxY, BOX_W, h, TFT_BLACK);
+  Display.drawRect(BOX_X, boxY, BOX_W, h, green());
+  Display.drawRect(BOX_X + 1, boxY + 1, BOX_W - 2, h - 2, green());
 
   Display.setTextSize(2);
   Display.setTextColor(green(), TFT_BLACK);
   Display.setTextDatum(TC_DATUM);
-  Display.drawString(title, DISPLAY_WIDTH / 2, BOX_Y + 7);
-  Display.drawFastHLine(BOX_X + 6, BOX_Y + TITLE_H, BOX_W - 12, dimGreen());
+  Display.drawString(title, DISPLAY_WIDTH / 2, boxY + 6);
+  Display.drawFastHLine(BOX_X + 6, boxY + TITLE_H, BOX_W - 12, dimGreen());
   Display.setTextDatum(TL_DATUM);
+  return boxY;
 }
 
-static void drawFooter(int boxH, const char *text) {
+static void drawFooter(int boxY, int boxH, const char *text) {
   Display.setTextSize(1);
   Display.setTextColor(dimGreen(), TFT_BLACK);
   Display.setTextDatum(TC_DATUM);
-  Display.drawString(text, DISPLAY_WIDTH / 2, BOX_Y + boxH - FOOTER_H + 4);
+  Display.drawString(text, DISPLAY_WIDTH / 2, boxY + boxH - FOOTER_H + 4);
   Display.setTextDatum(TL_DATUM);
 }
 
@@ -178,10 +183,10 @@ void SettingsMenu::draw() {
 }
 
 void SettingsMenu::drawList() {
-  int h = TITLE_H + 6 + _count * ROW_H + FOOTER_H + 4;
-  drawFrame(h, "CONFIGURACION");
+  int h = TITLE_H + 4 + _count * ROW_H + FOOTER_H + 4;
+  int boxY = drawFrame(h, "CONFIGURACION");
 
-  int y = BOX_Y + TITLE_H + 6;
+  int y = boxY + TITLE_H + 4;
   for (int i = 0; i < _count; i++, y += ROW_H) {
     const Item &item = _items[i];
     bool sel = (i == _selected);
@@ -206,7 +211,7 @@ void SettingsMenu::drawList() {
     Display.setTextDatum(TL_DATUM);
   }
 
-  drawFooter(h, "BOOT:bajar  +:cambiar  PWR:salir");
+  drawFooter(boxY, h, "BOOT:bajar  +:cambiar  PWR:salir");
 }
 
 void SettingsMenu::drawInfo() {
@@ -214,10 +219,10 @@ void SettingsMenu::drawInfo() {
   if (_cb.fillInfo) _cb.fillInfo(info);
 
   const int lines = 5;
-  int h = TITLE_H + 6 + lines * ROW_H + FOOTER_H + 4;
-  drawFrame(h, "INFO");
+  int h = TITLE_H + 4 + lines * ROW_H + FOOTER_H + 4;
+  int boxY = drawFrame(h, "INFO");
 
-  int y = BOX_Y + TITLE_H + 6 + ROW_H / 2;
+  int y = boxY + TITLE_H + 4 + ROW_H / 2;
   char buf[32];
   Display.setTextColor(green(), TFT_BLACK);
 
@@ -267,7 +272,7 @@ void SettingsMenu::drawInfo() {
   Display.drawString(info.sleep, BOX_X + BOX_W - PAD, y);
 
   Display.setTextDatum(TL_DATUM);
-  drawFooter(h, "Toca o pulsa para volver");
+  drawFooter(boxY, h, "Toca o pulsa para volver");
 }
 
 #endif  // WAVESHARE_154

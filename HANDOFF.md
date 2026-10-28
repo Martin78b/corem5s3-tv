@@ -324,7 +324,7 @@ El ESP32-S3 tiene USB OTG nativo; con TinyUSB se presenta como **unidad de almac
 El entorno `waveshare-s3-touch-lcd-154` ya usa `ARDUINO_USB_MODE=0` (TinyUSB), requisito para MSC.
 El USB será **compuesto** (CDC para logs/flasheo + MSC).
 
-- [ ] **F6.1 Spike técnico primero** (lo de mayor riesgo):
+- [x] **F6.1 Spike técnico primero** (lo de mayor riesgo):
   - Clase `USBMSC` del core Arduino 2.x (`#include "USB.h"`, `"USBMSC.h"`; callbacks `onRead`, `onWrite`, `onStartStop`).
   - La SD de la Waveshare va por **SDMMC 4-bit** (`SD_MMC`). En el core 2.x, `SD_MMC` probablemente no expone
     lectura/escritura de sectores en crudo → usar la API IDF (`sdmmc_read_sectors` / `sdmmc_write_sectors`)
@@ -332,24 +332,29 @@ El USB será **compuesto** (CDC para logs/flasheo + MSC).
     verificar antes de decidir si conviene migrar de core.
   - Comprobar que el flasheo y el monitor serie siguen funcionando con USB compuesto
     (puede requerir el botón BOOT para flashear).
-- [ ] **F6.2 Detección de PC vs cargador**: usar los eventos USB de TinyUSB (`ARDUINO_USB_STARTED_EVENT`,
+- [x] **F6.2 Detección de PC vs cargador**: usar los eventos USB de TinyUSB (`ARDUINO_USB_STARTED_EVENT`,
   `ARDUINO_USB_STOPPED_EVENT`, `ARDUINO_USB_SUSPEND_EVENT`). Solo una PC enumera el dispositivo; un cargador no.
-- [ ] **F6.3 Flujo**:
+- [x] **F6.3 Flujo**:
   1. PC detectada → OSD "PC detectada · ¿Modo USB? (tap = sí)", o entrar desde Menú → *Modo USB*.
   2. Al aceptar: pausar la reproducción, cerrar archivos y **desmontar la SD** en el firmware (`SD_MMC.end()`),
      y luego marcar el medio como presente para la PC.
   3. Pantalla fija "MODO USB · No desconectar · Expulsa desde la PC".
   4. Al expulsar (`onStartStop` con `load_eject`) o desconectar el cable: marcar el medio como no presente,
      **volver a montar la SD**, reescanear episodios (`VideoPlayer::scanEpisodes`), rehacer la playlist y retomar.
-- [ ] **F6.4 Regla de oro**: **nunca** acceso simultáneo PC + firmware (corrompe FAT). Mientras no esté en modo USB,
+- [x] **F6.4 Regla de oro**: **nunca** acceso simultáneo PC + firmware (corrompe FAT). Mientras no esté en modo USB,
   el MSC reporta "medio no presente" (unidad vacía) para que la PC no monte nada.
-- [ ] **F6.5 Expectativas**: USB Full Speed (12 Mbps) → ~0.6–1 MB/s reales; un capítulo de ~100 MB tarda 2–3 min.
+- [x] **F6.5 Expectativas**: USB Full Speed (12 Mbps) → ~0.6–1 MB/s reales; un capítulo de ~100 MB tarda 2–3 min.
   Documentarlo en el README.
-- [ ] **F6.6 Batería**: con el cable conectado el equipo carga; mantener el backlight bajo durante el modo USB.
-- [ ] **F6.7 (opcional)**: en `tools/convert_episodes.py`, permitir `--output` directo a la unidad montada y avisar
+- [x] **F6.6 Batería**: con el cable conectado el equipo carga; mantener el backlight bajo durante el modo USB.
+- [x] **F6.7 (opcional)**: en `tools/convert_episodes.py`, permitir `--output` directo a la unidad montada y avisar
   si el tamaño de salida no coincide con la placa (ver B2).
-- [ ] **F6.8 M5**: su entorno usa `ARDUINO_USB_MODE=1` (USB-Serial/JTAG por hardware) y la SD comparte el bus SPI
+- [x] **F6.8 M5**: su entorno usa `ARDUINO_USB_MODE=1` (USB-Serial/JTAG por hardware) y la SD comparte el bus SPI
   con el LCD. Fuera de alcance salvo que sea barato.
+
+  ✅ **F6 aplicado (2026-10-28), pendiente de probar en hardware.** Módulo `usb_msc.h/.cpp`:
+  - `USBMSC` estático registrado antes de `app_main()` (`USB.begin()`), con `mediaPresent(false)` fuera de `AppState::USB_MSC`.
+  - Al entrar en modo USB (por toque en el OSD `PC DETECTADA` o desde `Menú → MODO USB`, incluso con SD sin episodios): se cierran `s_audio`/`s_video`, se desmonta VFS (`SD_MMC.end()`), se inicia SDMMC en crudo por IDF (`sdmmc_host_init` + `sdmmc_card_init`) y se expone la unidad con `sdmmc_read_sectors` / `sdmmc_write_sectors` protegidos por mutex. Backlight al 20 % (`USB_MODE_BRIGHTNESS_PCT`) e inactividad en pausa.
+  - Al expulsar desde la PC (`onStartStop` con `load_eject && !start`), desconectar el cable o pulsar `PWR` corto en reposo: se oculta la unidad (`mediaPresent(false)`), se libera `sdmmc_host_deinit()`, se remonta `SD_MMC`, se reescanean los episodios y se retoma la reproducción.
 
 ## F7 — Versión del firmware y URL del repo en la pantalla de boot
 

@@ -135,6 +135,11 @@
 #define AUTO_OFF_MINUTE_MS 60000UL
 #endif
 
+// ── USB Mass Storage mode (F6, Waveshare) ──
+#define USB_PROMPT_OSD_MS 8000      // "PC DETECTADA" prompt duration
+#define USB_DISCONNECT_MS 1000      // USB suspend duration treated as unplug
+#define USB_MODE_BRIGHTNESS_PCT 20  // Dimmed backlight while in USB mode
+
 // ── Firmware info (shown under the boot logo) ──
 // FW_VERSION / FW_GIT_HASH can be injected with -D at build time (HANDOFF F7.2)
 #ifndef FW_VERSION

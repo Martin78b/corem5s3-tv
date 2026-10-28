@@ -21,6 +21,7 @@
 #include "gesture_control.h"
 #include "menu.h"
 #include "settings.h"
+#include "usb_msc.h"
 #include <driver/i2c.h>
 #endif
 
@@ -48,6 +49,7 @@ enum class AppState : uint8_t {
   STATIC,     // TV static: boot, between episodes, channel change
   PLAYING,    // Episode playing (or finishing)
   MENU,       // Settings menu open, playback paused
+  USB_MSC,    // SD card exposed to PC over USB Mass Storage (F6)
   POWER_OFF,  // CRT-off animation, then deep sleep
 };
 static std::atomic<AppState> s_appState{AppState::STATIC};
@@ -77,6 +79,10 @@ static QueueHandle_t s_uiQueue = NULL;
 static std::atomic<uint32_t> s_touchCount{0};
 static uint8_t s_sleepMenuOption = AutoOff::SLEEP_OFF;  // Edited by the menu
 static AutoOff::Status s_autoOff = {AutoOff::Source::NONE, 0, false};
+static bool s_usbModeRequested = false;
+static bool s_usbPromptActive = false;
+static uint32_t s_usbPromptStart = 0;
+static uint32_t s_consumedTouchCount = 0;
 #if GESTURE_DEBUG
 static struct { bool ok; uint8_t finger; int16_t x, y; } s_touchDbg = { false, 0, -1, -1 };
 #endif
@@ -136,6 +142,12 @@ static void tickMenu(bool pwrShort, bool boot, bool plus);
 static void persistGestureLevels();
 static void tickAutoOff(bool &pwrShort, bool &boot, bool &plus);
 static void showAutoOffOSD(Gfx &g, bool besideBattery);
+static void enterUsbMode();
+static void leaveUsbMode();
+static void tickUsbMode(bool pwrShort);
+static bool tickUsbPrompt();
+static void showUsbPromptOSD(Gfx &g);
+static void showNoEpisodesScreen();
 static void i2c_scan();
 #endif
 static void formatVersion(char *buf, size_t len);
@@ -181,16 +193,18 @@ static void touchTask(void *arg) {
     }
     bool keepFast = irqActive || (millis() - lastEventEdge < 200);
 
-    // Menu abierto: los gestos se vuelven eventos para loop() y no tocan
-    // volumen/brillo. Al cambiar de modo se descarta el gesto a medias y se
-    // adoptan los niveles del menu (loop() los escribe antes de cambiar el estado).
-    bool inMenu = (s_appState == AppState::MENU);
-    if (inMenu != menuMode) {
-      menuMode = inMenu;
-      s_gesture.setMenuMode(inMenu, s_settings.volumePct, s_settings.brightnessPct);
+    // Menu abierto o modo USB: los gestos se vuelven eventos para loop() y no
+    // tocan volumen/brillo. Al cambiar de modo se descarta el gesto a medias y
+    // se adoptan los niveles del menu (loop() los escribe antes de cambiar el estado).
+    AppState st = s_appState.load();
+    bool uiMode = (st == AppState::MENU || st == AppState::USB_MSC);
+    if (uiMode != menuMode) {
+      menuMode = uiMode;
+      s_gesture.setMenuMode(uiMode, s_settings.volumePct, s_settings.brightnessPct);
     }
     GestureResult result = readTouch();
-    if (inMenu && result != GestureResult::NONE) {
+    if ((uiMode && result != GestureResult::NONE) ||
+        result == GestureResult::TAP) {
       xQueueSend(s_uiQueue, &result, 0);
     }
     vTaskDelay(pdMS_TO_TICKS(keepFast ? 5 : 30));
@@ -200,7 +214,11 @@ static void touchTask(void *arg) {
 // CRT off animation, release the power latch (GPIO2) and deep sleep. On USB
 // power the board stays on, so deep sleep is what actually stops it.
 static void powerOff() {
+  if (s_appState == AppState::USB_MSC) {
+    UsbMsc::leave();
+  }
   s_appState = AppState::POWER_OFF;
+  Backlight::setBrightness(s_settings.brightnessPct);
   showCRTOffAnimation();
   digitalWrite(2, LOW);
   delay(100);
@@ -443,9 +461,11 @@ void setup() {
   s_uiQueue = xQueueCreate(8, sizeof(GestureResult));
   AutoOff::setIdle(s_settings.idleOffOption);
   AutoOff::activity(millis());
+  UsbMsc::init();
 #endif
 
   s_episodeCount = VideoPlayer::scanEpisodes(s_episodes, MAX_EPISODES);
+#ifndef WAVESHARE_154
   if (s_episodeCount == 0) {
     Display.setTextSize(2);
     Display.setTextColor(TFT_YELLOW, TFT_BLACK);
@@ -456,6 +476,7 @@ void setup() {
       delay(10);
     }
   }
+#endif
 
   // log_i("Found %d episodes", s_episodeCount);
   // Display.drawString("Found episodes", 10, 210);
@@ -463,6 +484,10 @@ void setup() {
   xTaskCreatePinnedToCore(audioTask, "audio", 16384, NULL, 5, NULL, 0);
 #ifdef WAVESHARE_154
   xTaskCreatePinnedToCore(touchTask, "touch", 8192, NULL, 1, NULL, 0);
+  if (s_episodeCount == 0) {
+    showNoEpisodesScreen();
+    return;
+  }
 #endif
 
   buildPlaylist(true);
@@ -486,13 +511,24 @@ void loop() {
     bool plus = buttonPressed(plusBtn);
     tickAutoOff(pwrShort, boot, plus);
 
+    if (s_appState == AppState::USB_MSC) {
+      tickUsbMode(pwrShort);
+      return;
+    }
     if (s_appState == AppState::MENU) {
       tickMenu(pwrShort, boot, plus);
       return;
     }
-    // PWR short press: open the menu (only while an episode is playing)
-    if (pwrShort && s_playing && s_audio.isPlaying()) {
+    if (tickUsbPrompt()) {
+      return;
+    }
+    // PWR short press: open the menu (while playing, or on an empty SD card)
+    if (pwrShort && ((s_playing && s_audio.isPlaying()) || s_episodeCount == 0)) {
       openMenu();
+      return;
+    }
+    if (s_episodeCount == 0) {
+      delay(10);
       return;
     }
     // BOOT button (GPIO0): short press = next channel
@@ -626,6 +662,7 @@ static void composeOSD(Gfx &g) {
 #ifdef WAVESHARE_154
   s_gesture.renderOSD(g);
   showAutoOffOSD(g, batteryShown);
+  showUsbPromptOSD(g);
 #endif
 
   // Low battery warning: once per discharge, re-armed when charging.
@@ -859,8 +896,12 @@ static void menuApplyIdle(uint8_t option) {
   AutoOff::activity(millis());
 }
 
+static void menuRequestUsbMode() { s_usbModeRequested = true; }
+
 // Pauses playback and opens the menu over the frozen frame.
 static void openMenu() {
+  s_usbPromptActive = false;
+  s_usbModeRequested = false;
   s_settings.volumePct = s_gesture.getVolumePct();
   s_settings.brightnessPct = s_gesture.getBrightnessPct();
 
@@ -871,8 +912,10 @@ static void openMenu() {
   xQueueReset(s_uiQueue);
   s_appState = AppState::MENU;
   s_sleepMenuOption = AutoOff::sleepOption();  // A warning may have cleared it
-  s_menu.open(s_settings, {menuApplyVolume, menuApplyBrightness, menuFillInfo,
-                           &s_sleepMenuOption, menuApplySleep, menuApplyIdle});
+  s_menu.open(s_settings,
+              {menuApplyVolume, menuApplyBrightness, menuFillInfo,
+               &s_sleepMenuOption, menuApplySleep, menuApplyIdle,
+               menuRequestUsbMode});
 }
 
 // Saves what changed and resumes. The next video frame repaints the screen.
@@ -880,6 +923,11 @@ static void closeMenu() {
   if (s_settings != s_savedSettings) {
     SettingsStore::save(s_settings);
     s_savedSettings = s_settings;
+  }
+  if (s_episodeCount == 0) {
+    s_appState = AppState::STATIC;
+    showNoEpisodesScreen();
+    return;
   }
   s_appState = AppState::PLAYING;  // touchTask now adopts s_settings levels
 
@@ -912,10 +960,223 @@ static void tickMenu(bool pwrShort, bool boot, bool plus) {
   }
 
   if (!s_menu.tick(hasInput ? &input : nullptr)) {
-    closeMenu();
+    if (s_usbModeRequested) {
+      s_usbModeRequested = false;
+      if (s_settings != s_savedSettings) {
+        SettingsStore::save(s_settings);
+        s_savedSettings = s_settings;
+      }
+      enterUsbMode();
+    } else {
+      closeMenu();
+    }
     return;
   }
   delay(10);
+}
+
+// ── USB Mass Storage mode (F6) ──
+
+static void showNoEpisodesScreen() {
+  Display.fillScreen(TFT_BLACK);
+  Display.setTextSize(2);
+  Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+  Display.drawString("NO .mjpeg FILES", 20, 100);
+  Display.drawString("ON SD CARD", 40, 130);
+}
+
+static void drawUsbModeScreen() {
+  Display.fillScreen(TFT_BLACK);
+  uint16_t green = TFT_GREEN;
+  uint16_t dimGreen = Display.color565(0, 120, 40);
+  const int boxX = 12, boxY = 24, boxW = DISPLAY_WIDTH - 24, boxH = 192;
+
+  Display.drawRect(boxX, boxY, boxW, boxH, green);
+  Display.drawRect(boxX + 1, boxY + 1, boxW - 2, boxH - 2, green);
+
+  Display.setTextDatum(TC_DATUM);
+  Display.setTextSize(2);
+  Display.setTextColor(green, TFT_BLACK);
+  Display.drawString("MODO USB", DISPLAY_WIDTH / 2, boxY + 7);
+  Display.drawFastHLine(boxX + 6, boxY + 28, boxW - 12, dimGreen);
+
+  char sdLine[24];
+  uint32_t mb = UsbMsc::cardSizeMB();
+  if (mb >= 1024) {
+    snprintf(sdLine, sizeof(sdLine), "SD: %lu.%lu GB",
+             (unsigned long)(mb / 1024),
+             (unsigned long)(((mb % 1024) * 10) / 1024));
+  } else if (mb > 0) {
+    snprintf(sdLine, sizeof(sdLine), "SD: %lu MB", (unsigned long)mb);
+  } else {
+    snprintf(sdLine, sizeof(sdLine), "SD EN LA PC");
+  }
+  Display.drawString(sdLine, DISPLAY_WIDTH / 2, boxY + 42);
+
+  Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+  Display.drawString("No desconectar", DISPLAY_WIDTH / 2, boxY + 80);
+
+  Display.setTextSize(1);
+  Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  Display.drawString("Expulsa la unidad desde", DISPLAY_WIDTH / 2, boxY + 118);
+  Display.drawString("la PC al terminar", DISPLAY_WIDTH / 2, boxY + 132);
+
+  Display.setTextColor(dimGreen, TFT_BLACK);
+  Display.drawString("Expulsa en PC o PWR:salir", DISPLAY_WIDTH / 2,
+                     boxY + boxH - 14);
+  Display.setTextDatum(TL_DATUM);
+}
+
+static void enterUsbMode() {
+  s_usbPromptActive = false;
+  s_playing = false;
+#if DISPLAY_DMA
+  s_frontReady = false;
+#endif
+
+  xSemaphoreTake(s_audioMutex, portMAX_DELAY);
+  if (xSemaphoreTake(s_sdMutex, portMAX_DELAY) == pdTRUE) {
+    s_audio.stop();
+    s_video.close();
+    SD_MMC.end();
+    xSemaphoreGive(s_sdMutex);
+  }
+  xSemaphoreGive(s_audioMutex);
+
+  if (!UsbMsc::enter()) {
+    Display.fillScreen(TFT_BLACK);
+    Display.setTextSize(2);
+    Display.setTextColor(TFT_RED, TFT_BLACK);
+    Display.drawString("USB INIT FAIL", 30, 100);
+    delay(1500);
+    leaveUsbMode();
+    return;
+  }
+
+  xQueueReset(s_uiQueue);
+  s_appState = AppState::USB_MSC;
+  Backlight::setBrightness(
+      min(s_settings.brightnessPct, (uint8_t)USB_MODE_BRIGHTNESS_PCT));
+  drawUsbModeScreen();
+}
+
+static void leaveUsbMode() {
+  UsbMsc::leave();
+  Backlight::setBrightness(s_settings.brightnessPct);
+  xQueueReset(s_uiQueue);
+
+  bool sdOk = false;
+  if (xSemaphoreTake(s_sdMutex, portMAX_DELAY) == pdTRUE) {
+    sdOk = initSDCard();
+    s_episodeCount =
+        sdOk ? VideoPlayer::scanEpisodes(s_episodes, MAX_EPISODES) : 0;
+    xSemaphoreGive(s_sdMutex);
+  }
+
+  if (!sdOk) {
+    s_playing = false;
+    s_appState = AppState::STATIC;
+    Display.fillScreen(TFT_BLACK);
+    Display.setTextSize(2);
+    Display.setTextColor(TFT_RED, TFT_BLACK);
+    Display.drawString("NO SD CARD", 40, 100);
+    return;
+  }
+
+  if (s_episodeCount == 0) {
+    s_playing = false;
+    s_appState = AppState::STATIC;
+    showNoEpisodesScreen();
+    return;
+  }
+
+  buildPlaylist(true);
+  showTVStatic(CHANNEL_STATIC_MS);
+  s_channelNumber = 1;
+  playEpisode(s_playlist[0]);
+}
+
+static void tickUsbMode(bool pwrShort) {
+  static uint32_t lastWarnSec = 0;
+  static bool wasWarn = false;
+
+  GestureResult g;
+  while (xQueueReceive(s_uiQueue, &g, 0) == pdTRUE) {
+    // Discard touch gestures while in USB mode
+  }
+
+  if (UsbMsc::tick() || (pwrShort && UsbMsc::isIdle())) {
+    wasWarn = false;
+    lastWarnSec = 0;
+    leaveUsbMode();
+    return;
+  }
+
+  if (s_autoOff.warning != AutoOff::Source::NONE) {
+    uint32_t sec = (s_autoOff.remainingMs + 999) / 1000;
+    if (!wasWarn || sec != lastWarnSec) {
+      wasWarn = true;
+      lastWarnSec = sec;
+      drawUsbModeScreen();
+      showAutoOffOSD(Display, false);
+    }
+  } else if (wasWarn) {
+    wasWarn = false;
+    lastWarnSec = 0;
+    drawUsbModeScreen();
+  }
+  delay(20);
+}
+
+// Handles the "PC DETECTADA" prompt outside the menu/USB mode. Returns true
+// if it just entered USB mode.
+static bool tickUsbPrompt() {
+  uint32_t now = millis();
+  if (UsbMsc::consumePromptRequest()) {
+    s_usbPromptActive = true;
+    s_usbPromptStart = now;
+    if (s_episodeCount == 0) {
+      showUsbPromptOSD(Display);
+    }
+  }
+
+  if (s_usbPromptActive &&
+      (!UsbMsc::pcConnected() || now - s_usbPromptStart >= USB_PROMPT_OSD_MS)) {
+    s_usbPromptActive = false;
+    if (s_episodeCount == 0) {
+      showNoEpisodesScreen();
+    }
+  }
+
+  bool tapped = false;
+  GestureResult g;
+  while (xQueueReceive(s_uiQueue, &g, 0) == pdTRUE) {
+    if (g == GestureResult::TAP && s_touchCount.load() != s_consumedTouchCount) {
+      tapped = true;
+    }
+  }
+
+  if (s_usbPromptActive && tapped) {
+    enterUsbMode();
+    return true;
+  }
+  return false;
+}
+
+static void showUsbPromptOSD(Gfx &g) {
+  if (!s_usbPromptActive) return;
+  const int x = 8, y = 176, w = DISPLAY_WIDTH - 16, h = 52;
+  g.fillRect(x, y, w, h, TFT_BLACK);
+  g.drawRect(x, y, w, h, TFT_GREEN);
+  g.drawRect(x + 1, y + 1, w - 2, h - 2, TFT_GREEN);
+  g.setTextDatum(TC_DATUM);
+  g.setTextSize(2);
+  g.setTextColor(TFT_GREEN, TFT_BLACK);
+  g.drawString("PC DETECTADA", DISPLAY_WIDTH / 2, y + 8);
+  g.setTextSize(1);
+  g.setTextColor(TFT_WHITE, TFT_BLACK);
+  g.drawString("Modo USB? Toca la pantalla", DISPLAY_WIDTH / 2, y + 34);
+  g.setTextDatum(TL_DATUM);
 }
 
 // Sleep timer + inactivity (F2). Called every loop() pass with the inputs of
@@ -933,12 +1194,15 @@ static void tickAutoOff(bool &pwrShort, bool &boot, bool &plus) {
         s_appState != AppState::MENU) {
       AutoOff::cancelWarning(now);
       pwrShort = boot = plus = false;
+      if (touched) s_consumedTouchCount = touches;
     }
     AutoOff::activity(now);
   }
 
   const BatteryMonitor::State &bat = BatteryMonitor::getState();
-  s_autoOff = AutoOff::tick(now, bat.valid && bat.charging);
+  bool holdIdle =
+      (bat.valid && bat.charging) || (s_appState == AppState::USB_MSC);
+  s_autoOff = AutoOff::tick(now, holdIdle);
   if (s_autoOff.expired) powerOff();
 }
 

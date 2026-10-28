@@ -275,6 +275,28 @@ def scan_directory(input_dir: str) -> list:
     return files
 
 
+def detect_existing_resolution(output_dir: str) -> Optional[tuple]:
+    """Inspect existing .mjpeg files in output_dir and return (width, height) from the first CMTV header."""
+    if not os.path.isdir(output_dir):
+        return None
+    try:
+        for name in sorted(os.listdir(output_dir)):
+            if name.startswith("._") or not name.lower().endswith(MJPEG_EXT):
+                continue
+            path = os.path.join(output_dir, name)
+            if not os.path.isfile(path):
+                continue
+            with open(path, "rb") as f:
+                hdr = f.read(16)
+            if len(hdr) == 16 and hdr[:4] == MJPEG_MAGIC and hdr[4] == MJPEG_HEADER_VERSION:
+                _, _, _, w, h, _ = struct.unpack("<BBHHHI", hdr[4:])
+                if w > 0 and h > 0:
+                    return (w, h)
+    except OSError:
+        pass
+    return None
+
+
 def estimate_storage(files: list, fps: int, quality: int, width: int, height: int) -> None:
     """Estimate total storage needed."""
     total_duration = 0
@@ -345,9 +367,17 @@ Examples:
     board_w, board_h = BOARD_RESOLUTIONS[args.board or DEFAULT_BOARD]
     args.width = args.width or board_w
     args.height = args.height or board_h
-    if (args.width, args.height) not in BOARD_RESOLUTIONS.values():
+    if args.board and (args.width, args.height) != (board_w, board_h):
+        print(f"WARNING: {args.width}x{args.height} does not match --board {args.board} "
+              f"({board_w}x{board_h}); the firmware will crop the picture.")
+    elif (args.width, args.height) not in BOARD_RESOLUTIONS.values():
         print(f"WARNING: {args.width}x{args.height} does not match any board display; "
               "the firmware will crop the picture.")
+    existing_res = detect_existing_resolution(args.output)
+    if existing_res and existing_res != (args.width, args.height):
+        print(f"WARNING: existing .mjpeg files in '{args.output}' are "
+              f"{existing_res[0]}x{existing_res[1]}, but output is set to "
+              f"{args.width}x{args.height}. Check --board.")
     if args.fps > 15:
         print(f"WARNING: --fps {args.fps} is above what the decoder sustains (~15-18); "
               "video may lag behind audio.")
