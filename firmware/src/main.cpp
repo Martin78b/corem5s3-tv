@@ -1038,7 +1038,13 @@ static void enterUsbMode() {
   if (xSemaphoreTake(s_sdMutex, portMAX_DELAY) == pdTRUE) {
     s_audio.stop();
     s_video.close();
-    SD_MMC.end();
+    // Do NOT call SD_MMC.end() here: UsbMsc::enter() reuses the already
+    // initialized sdmmc_card_t* handle directly, avoiding an SDMMC bus reset
+    // (CMD0/ACMD41 without VDD power cycle) that causes SDXC cards to fail
+    // re-initialization on USB disconnect.
+    if (SD_MMC.cardType() == CARD_NONE) {
+      initSDCard();
+    }
     xSemaphoreGive(s_sdMutex);
   }
   xSemaphoreGive(s_audioMutex);
@@ -1060,14 +1066,37 @@ static void enterUsbMode() {
   drawUsbModeScreen();
 }
 
+static void drawSdReloadScreen(const char *title, const char *subtitle,
+                               uint16_t accentColor) {
+  Display.fillScreen(TFT_BLACK);
+  const int boxX = 12, boxY = 64, boxW = DISPLAY_WIDTH - 24, boxH = 112;
+  Display.drawRect(boxX, boxY, boxW, boxH, accentColor);
+  Display.drawRect(boxX + 1, boxY + 1, boxW - 2, boxH - 2, accentColor);
+
+  Display.setTextDatum(TC_DATUM);
+  Display.setTextSize(2);
+  Display.setTextColor(accentColor, TFT_BLACK);
+  Display.drawString(title, DISPLAY_WIDTH / 2, boxY + 24);
+  if (subtitle && subtitle[0]) {
+    Display.setTextColor(TFT_WHITE, TFT_BLACK);
+    Display.drawString(subtitle, DISPLAY_WIDTH / 2, boxY + 64);
+  }
+  Display.setTextDatum(TL_DATUM);
+}
+
 static void leaveUsbMode() {
   UsbMsc::leave();
   Backlight::setBrightness(s_settings.brightnessPct);
   xQueueReset(s_uiQueue);
 
+  drawSdReloadScreen("LEYENDO SD", "Un momento...", TFT_CYAN);
+
   bool sdOk = false;
   if (xSemaphoreTake(s_sdMutex, portMAX_DELAY) == pdTRUE) {
-    sdOk = initSDCard();
+    sdOk = (SD_MMC.cardType() != CARD_NONE);
+    if (!sdOk) {
+      sdOk = initSDCard();
+    }
     s_episodeCount =
         sdOk ? VideoPlayer::scanEpisodes(s_episodes, MAX_EPISODES) : 0;
     xSemaphoreGive(s_sdMutex);
@@ -1089,6 +1118,12 @@ static void leaveUsbMode() {
     showNoEpisodesScreen();
     return;
   }
+
+  char epLine[24];
+  snprintf(epLine, sizeof(epLine), "%d EPISODIO%s", s_episodeCount,
+           s_episodeCount == 1 ? "" : "S");
+  drawSdReloadScreen("SD RECARGADA", epLine, TFT_GREEN);
+  delay(1200);
 
   buildPlaylist(true);
   showTVStatic(CHANNEL_STATIC_MS);
@@ -1274,19 +1309,25 @@ static void persistGestureLevels() {
 
 static bool initSDCard() {
 #ifdef WAVESHARE_154
-  if (!SD_MMC.setPins(SD_CLK, SD_CMD, SD_D0, SD_D1, SD_D2, SD_D3)) {
-    log_e("SD_MMC setPins failed");
-    return false;
-  }
-  if (!SD_MMC.begin()) {
-    log_e("SD_MMC init failed");
-    return false;
-  }
-  uint8_t cardType = SD_MMC.cardType();
-  if (cardType != CARD_NONE && cardType != CARD_MMC) {
-    uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
-    log_i("SD_MMC card detected: %llu MB", cardSize);
-    return true;
+  for (int retry = 0; retry < 3; retry++) {
+    SD_MMC.end();
+    if (retry > 0) {
+      delay(150);
+    }
+    if (!SD_MMC.setPins(SD_CLK, SD_CMD, SD_D0, SD_D1, SD_D2, SD_D3)) {
+      log_e("SD_MMC setPins failed");
+      continue;
+    }
+    if (!SD_MMC.begin()) {
+      log_e("SD_MMC init failed (attempt %d)", retry + 1);
+      continue;
+    }
+    uint8_t cardType = SD_MMC.cardType();
+    if (cardType != CARD_NONE && cardType != CARD_MMC) {
+      uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
+      log_i("SD_MMC card detected: %llu MB", cardSize);
+      return true;
+    }
   }
   log_e("No SD card found");
   return false;
