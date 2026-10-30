@@ -7,8 +7,8 @@ struct Settings {
   uint8_t volumePct;      // 0-100
   uint8_t brightnessPct;  // 10-100
   uint8_t idleOffOption;  // AutoOff::IDLE_LABELS index: off / 1 h / 2 h / 4 h
+  uint8_t rotation;       // Rotation::LABELS index: 0 / 90 / 180 / 270 / AUTO
   // Reserved for upcoming features (stored, not used yet):
-  uint8_t rotation;       // F3: 0 = auto, 1-4 = 0/90/180/270 degrees
   bool wifiEnabled;       // F4
 
   bool operator==(const Settings &o) const {

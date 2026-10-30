@@ -1,15 +1,16 @@
 #include "menu.h"
 
 #include "auto_off.h"
+#include "rotation.h"
 
 #ifdef WAVESHARE_154
 
 // ── Layout (240x240; text size 2 = 12x16 px per char) ──
 static const int BOX_X = 12;
 static const int BOX_W = DISPLAY_WIDTH - 2 * BOX_X;
-static const int TITLE_H = 26;
-static const int ROW_H = 24;
-static const int FOOTER_H = 16;
+static const int TITLE_H = 24;
+static const int ROW_H = 22;
+static const int FOOTER_H = 14;
 static const int PAD = 10;
 
 static uint16_t green() { return TFT_GREEN; }
@@ -40,10 +41,12 @@ void SettingsMenu::addAction(const char *label, Action action) {
 void SettingsMenu::open(Settings &settings, const Callbacks &cb) {
   _cb = cb;
   _count = 0;
-  // Items for F3 (rotation) and F4 (WiFi) are added here when those
-  // features exist; Settings already stores their values.
+  // Item for F4 (WiFi) is added here when that feature exists; Settings
+  // already stores its value.
   addRange("VOLUMEN", &settings.volumePct, 0, 100, 10, "%", cb.applyVolume);
   addRange("BRILLO", &settings.brightnessPct, 10, 100, 10, "%", cb.applyBrightness);
+  addEnum("ROTACION", &settings.rotation, Rotation::LABELS,
+          Rotation::OPTION_COUNT, cb.applyRotation);
   addEnum("APAGADO", cb.sleepOption, AutoOff::SLEEP_LABELS,
           AutoOff::SLEEP_OPTION_COUNT, cb.applySleep);
   addEnum("INACTIVIDAD", &settings.idleOffOption, AutoOff::IDLE_LABELS,
@@ -160,7 +163,7 @@ static int drawFrame(int h, const char *title) {
   Display.setTextSize(2);
   Display.setTextColor(green(), TFT_BLACK);
   Display.setTextDatum(TC_DATUM);
-  Display.drawString(title, DISPLAY_WIDTH / 2, boxY + 6);
+  Display.drawString(title, DISPLAY_WIDTH / 2, boxY + 5);
   Display.drawFastHLine(BOX_X + 6, boxY + TITLE_H, BOX_W - 12, dimGreen());
   Display.setTextDatum(TL_DATUM);
   return boxY;
@@ -170,7 +173,7 @@ static void drawFooter(int boxY, int boxH, const char *text) {
   Display.setTextSize(1);
   Display.setTextColor(dimGreen(), TFT_BLACK);
   Display.setTextDatum(TC_DATUM);
-  Display.drawString(text, DISPLAY_WIDTH / 2, boxY + boxH - FOOTER_H + 4);
+  Display.drawString(text, DISPLAY_WIDTH / 2, boxY + boxH - FOOTER_H + 3);
   Display.setTextDatum(TL_DATUM);
 }
 

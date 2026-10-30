@@ -33,6 +33,7 @@ public:
   struct Callbacks {
     void (*applyVolume)(uint8_t pct);      // Called on every volume change
     void (*applyBrightness)(uint8_t pct);  // Called on every brightness change
+    void (*applyRotation)(uint8_t option); // Settings::rotation changed
     void (*fillInfo)(InfoData &info);
     uint8_t *sleepOption;                  // AutoOff::SLEEP_LABELS index
     void (*applySleep)(uint8_t option);
@@ -41,6 +42,7 @@ public:
   };
 
   void open(Settings &settings, const Callbacks &cb);
+  void markDirty() { _dirty = true; }
 
   // Call every loop() pass while open, with the pending input or nullptr.
   // Returns false once the menu has closed (by the user or by timeout).

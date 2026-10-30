@@ -20,6 +20,7 @@
 #include "es8311.h"
 #include "gesture_control.h"
 #include "menu.h"
+#include "rotation.h"
 #include "settings.h"
 #include "usb_msc.h"
 #include <driver/i2c.h>
@@ -147,7 +148,9 @@ static void leaveUsbMode();
 static void tickUsbMode(bool pwrShort);
 static bool tickUsbPrompt();
 static void showUsbPromptOSD(Gfx &g);
+static void drawUsbModeScreen();
 static void showNoEpisodesScreen();
+static void applyRotationIfNeeded();
 static void i2c_scan();
 #endif
 static void formatVersion(char *buf, size_t len);
@@ -184,6 +187,7 @@ static void touchTask(void *arg) {
   delay(100);  // Give CST816T time to boot after reset release
 
   bool menuMode = false;
+  uint8_t lastRot = Rotation::current();
   while (true) {
     // La IRQ del CST816 es activa en bajo. Cuando esta pendiente un evento
     // tactil muestreamos rapido para no perder el toque; en reposo, lento.
@@ -192,6 +196,14 @@ static void touchTask(void *arg) {
       lastEventEdge = millis();
     }
     bool keepFast = irqActive || (millis() - lastEventEdge < 200);
+
+    // Poll accelerometer on the same I2C bus when Auto rotation is enabled.
+    Rotation::pollImu(millis());
+    uint8_t curRot = Rotation::current();
+    if (curRot != lastRot) {
+      lastRot = curRot;
+      s_gesture.resetTracking();
+    }
 
     // Menu abierto o modo USB: los gestos se vuelven eventos para loop() y no
     // tocan volumen/brillo. Al cambiar de modo se descarta el gesto a medias y
@@ -318,6 +330,12 @@ void setup() {
   Display.setRotation(0);
   Display.setSwapBytes(true);
   Display.fillScreen(TFT_BLACK);
+#ifdef WAVESHARE_154
+  s_settings = SettingsStore::load();
+  s_savedSettings = s_settings;
+  Rotation::setMode(s_settings.rotation);
+  applyRotationIfNeeded();
+#endif
 
 #ifdef M5STACK
   SPEAKER_OBJ.setVolume(128);
@@ -406,6 +424,8 @@ void setup() {
   // Configure button pins
   pinMode(BTN_BOOT, INPUT_PULLUP);
   pinMode(BTN_PLUS, INPUT_PULLUP);
+  Rotation::init();
+  Rotation::setMode(s_settings.rotation);
 #endif
 
   if (!initSDCard()) {
@@ -452,8 +472,6 @@ void setup() {
   }
 
 #ifdef WAVESHARE_154
-  s_settings = SettingsStore::load();
-  s_savedSettings = s_settings;
   // Init PWM backlight on TFT_BL (GPIO46) - required for brightness swipes
   Backlight::begin(TFT_BL, s_settings.brightnessPct);
   s_gesture.begin(&s_audio, s_settings.volumePct, s_settings.brightnessPct);
@@ -503,6 +521,8 @@ void setup() {
 void loop() {
 #ifdef WAVESHARE_154
   {
+    applyRotationIfNeeded();
+
     // Poll every input on every pass so their debounce state stays right
     static DebouncedButton bootBtn = {BTN_BOOT, 0, false};
     static DebouncedButton plusBtn = {BTN_PLUS, 0, false};
@@ -850,15 +870,65 @@ static GestureResult readTouch() {
     uint16_t rawX = ((uint16_t)(data[3] & 0x0F) << 8) | data[4];
     uint16_t rawY = ((uint16_t)(data[5] & 0x0F) << 8) | data[6];
     // CST816T on this board reports coordinates in display pixel space (0-239),
-    // NOT 12-bit (0-4095). Use directly with bounds clamping.
-    lastX = (rawX < DISPLAY_WIDTH) ? (int16_t)rawX : DISPLAY_WIDTH - 1;
-    lastY = (rawY < DISPLAY_HEIGHT) ? (int16_t)rawY : DISPLAY_HEIGHT - 1;
+    // NOT 12-bit (0-4095). Rotate into the active display orientation.
+    Rotation::mapTouch(rawX, rawY, lastX, lastY);
   }
 
   // El estado se deriva solo de FingerNum (data[2]), nunca del GestureID.
   // Esta tarea corre en core 0: no actua sobre los gestos, solo los devuelve.
   // Durante la reproduccion un TAP no hace nada (canales: botones).
   return s_gesture.update(fingerCount, lastX, lastY);
+}
+
+// ── Screen rotation (F3) ──
+
+static void applyRotationIfNeeded() {
+  uint8_t rot = 0;
+  if (!Rotation::consumeChange(rot)) return;
+
+  Display.setRotation(rot);
+#if DISPLAY_DMA
+  s_frontReady = false;
+#endif
+
+  AppState st = s_appState.load();
+  if (st == AppState::MENU) {
+    // Repaint the frozen background in the new orientation before the menu
+    // redraws on top of it.
+    if (s_episodeCount > 0 && s_currentEpisode >= 0) {
+#if DISPLAY_DMA
+      if (s_dmaEnabled) {
+        int buf = s_frontReady ? (1 - s_back) : s_back;
+        Display.startWrite();
+        Display.setSwapBytes(false);
+        Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        displayWritePixels((uint16_t *)s_frames[buf].getPointer(),
+                           DISPLAY_WIDTH * DISPLAY_HEIGHT);
+        Display.setSwapBytes(true);
+        Display.endWrite();
+      } else
+#endif
+      if (s_framebuffer) {
+        Display.startWrite();
+        Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        displayWritePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
+        Display.endWrite();
+      }
+    } else {
+      Display.fillScreen(TFT_BLACK);
+    }
+    s_menu.markDirty();
+  } else if (st == AppState::USB_MSC) {
+    drawUsbModeScreen();
+    if (s_autoOff.warning != AutoOff::Source::NONE) {
+      showAutoOffOSD(Display, false);
+    }
+  } else if (s_episodeCount == 0) {
+    showNoEpisodesScreen();
+    if (s_usbPromptActive) {
+      showUsbPromptOSD(Display);
+    }
+  }
 }
 
 // ── Settings menu (F1) ──
@@ -868,6 +938,11 @@ static void menuApplyVolume(uint8_t pct) {
 }
 
 static void menuApplyBrightness(uint8_t pct) { Backlight::setBrightness(pct); }
+
+static void menuApplyRotation(uint8_t option) {
+  Rotation::setMode(option);
+  applyRotationIfNeeded();
+}
 
 static void menuFillInfo(SettingsMenu::InfoData &info) {
   static char version[48];
@@ -913,8 +988,8 @@ static void openMenu() {
   s_appState = AppState::MENU;
   s_sleepMenuOption = AutoOff::sleepOption();  // A warning may have cleared it
   s_menu.open(s_settings,
-              {menuApplyVolume, menuApplyBrightness, menuFillInfo,
-               &s_sleepMenuOption, menuApplySleep, menuApplyIdle,
+              {menuApplyVolume, menuApplyBrightness, menuApplyRotation,
+               menuFillInfo, &s_sleepMenuOption, menuApplySleep, menuApplyIdle,
                menuRequestUsbMode});
 }
 

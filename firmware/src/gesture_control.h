@@ -89,6 +89,9 @@ public:
   // levels (the menu may have changed them). Call from the touch task only.
   void setMenuMode(bool menu, uint8_t volumePct, uint8_t brightnessPct);
 
+  // Drop any gesture in progress (e.g. when the screen rotation changes).
+  void resetTracking() { _state = GestureState::IDLE; }
+
   // Render OSD overlay if active onto `g` (the display or a frame buffer).
   // Call for each video frame.
   void renderOSD(Gfx& g);

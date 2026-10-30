@@ -1,6 +1,7 @@
 #include "settings.h"
 
 #include "auto_off.h"
+#include "rotation.h"
 
 #include <Preferences.h>
 
@@ -12,7 +13,7 @@ Settings defaults() {
   Settings s;
   s.volumePct = 90;
   s.brightnessPct = 100;
-  s.rotation = 0;
+  s.rotation = Rotation::ROT_DEFAULT;
   s.idleOffOption = AutoOff::IDLE_DEFAULT;
   s.wifiEnabled = false;
   return s;
@@ -38,6 +39,9 @@ Settings load() {
   // Never trust stored values blindly
   if (s.volumePct > 100) s.volumePct = 100;
   if (s.brightnessPct < 10 || s.brightnessPct > 100) s.brightnessPct = 100;
+  if (s.rotation >= Rotation::OPTION_COUNT) {
+    s.rotation = Rotation::ROT_DEFAULT;
+  }
   if (s.idleOffOption >= AutoOff::IDLE_OPTION_COUNT) {
     s.idleOffOption = AutoOff::IDLE_DEFAULT;
   }
@@ -57,7 +61,8 @@ void save(const Settings &s) {
   prefs.putUChar("idle", s.idleOffOption);
   prefs.putBool("wifi", s.wifiEnabled);
   prefs.end();
-  log_i("Settings saved (vol=%u bri=%u)", s.volumePct, s.brightnessPct);
+  log_i("Settings saved (vol=%u bri=%u rot=%u)", s.volumePct, s.brightnessPct,
+        s.rotation);
 }
 
 }  // namespace SettingsStore

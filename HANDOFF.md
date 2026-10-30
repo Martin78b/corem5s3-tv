@@ -264,24 +264,30 @@ CONFIGURACIÓN
 
 ## F3 — Rotación automática por acelerómetro
 
-- [ ] **F3.1 Verificar hardware primero**:
+- [x] **F3.1 Verificar hardware primero**:
   - Waveshare: `HARDWARE_REFERENCE.md` dice que hay un QMI8658 en I2C `0x6B` (bus compartido SDA42/SCL41),
     pero `docs/reference/scratch_esp32_s3_touch_lcd_1_54.h:61` dice `BSP_CAPS_IMU 0`. Confirmar llamando a
     `i2c_scan()` (ya existe en `main.cpp`) y leyendo el WHO_AM_I del QMI8658.
   - M5 CoreS3 **SE**: probablemente **no** tiene IMU (la CoreS3 normal sí, una BMI270 vía `M5.Imu`).
     Confirmar. Si no hay IMU, solo rotación manual desde el menú.
-- [ ] **F3.2 Driver mínimo del QMI8658**: solo acelerómetro (el giroscopio no hace falta), ODR bajo, unos 10 Hz.
+- [x] **F3.2 Driver mínimo del QMI8658**: solo acelerómetro (el giroscopio no hace falta), ODR bajo, unos 10 Hz.
   Leerlo **dentro de `touchTask`** para no competir por el bus I2C.
-- [ ] **F3.3 Lógica de orientación**: eje dominante de la gravedad, con histéresis (ángulo claro, ~35°),
+- [x] **F3.3 Lógica de orientación**: eje dominante de la gravedad, con histéresis (ángulo claro, ~35°),
   estabilidad de ~0.7 s antes de girar y sin girar si el dispositivo está plano (Z dominante).
-- [ ] **F3.4 Aplicar**: `Display.setRotation(n)` (rotación por hardware vía MADCTL, sin coste de CPU).
+- [x] **F3.4 Aplicar**: `Display.setRotation(n)` (rotación por hardware vía MADCTL, sin coste de CPU).
   Hacerlo desde el hilo de `loop()` (no desde `touchTask`) para evitar conflictos de SPI: la tarea
   solo publica la orientación deseada.
-- [ ] **F3.5 Rotar coordenadas táctiles** según la rotación actual, para que los gestos de volumen y brillo
+- [x] **F3.5 Rotar coordenadas táctiles** según la rotación actual, para que los gestos de volumen y brillo
   sigan la orientación visual.
-- [ ] **F3.6 Probar** posibles desplazamientos del ST7789 240×240 en las rotaciones 2 y 3 (rowstart/colstart).
-- [ ] **F3.7 M5 (320×240)**: o solo 0°/180°, o en vertical encoger el video con barras negras.
-- [ ] **F3.8 Ajuste en el menú**: Auto / fija 0° / 90° / 180° / 270°, guardado en NVS.
+- [x] **F3.6 Probar** posibles desplazamientos del ST7789 240×240 en las rotaciones 2 y 3 (rowstart/colstart).
+- [x] **F3.7 M5 (320×240)**: o solo 0°/180°, o en vertical encoger el video con barras negras.
+- [x] **F3.8 Ajuste en el menú**: Auto / fija 0° / 90° / 180° / 270°, guardado en NVS.
+
+  ✅ **F3 aplicado (2026-10-29), probado en hardware.** Módulo `rotation.h/.cpp` (Waveshare):
+  - Menú `ROTACION`: `0` / `90` / `180` / `270` / `AUTO`, guardado en NVS (`Settings::rotation`), con **fija `0` por defecto** (`ROT_DEFAULT = ROT_0`) para que la rotación automática sea opcional y compatible con el valor `0` ya guardado en NVS.
+  - `Rotation::init()` sondea el QMI8658 en `I2C_NUM_1` (`0x6B` y `0x6A`), verifica `WHO_AM_I == 0x05` y configura solo el acelerómetro (±4g, 62.5 Hz, filtro paso-bajo, giroscopio apagado). Si no hay IMU, `AUTO` se mantiene sin errores de I2C y las posiciones fijas siguen funcionando.
+  - En modo `AUTO`, `touchTask` muestrea `AX_L..AZ_H` cada 100 ms (10 Hz) en el mismo hilo del bus I2C; en modos fijos no hace lecturas I2C. Ignora inclinaciones planas (`|Z|` dominante o `< 0.45g`), aplica histéresis de ~35° (`dom * 7 >= sec * 10`) y exige `700 ms` (`IMU_STABLE_MS`) de estabilidad antes de publicar el giro. En hardware el eje X del sensor viene invertido respecto a la orientación visual de la pantalla, por lo que se fijó `IMU_INVERT_X 1` en `config.h`.
+  - `loop()` aplica `Display.setRotation(rot)` en el core 1 (TFT_eSPI ya define `CGRAM_OFFSET` con `rowstart=80`/`colstart=80` en rotaciones 2 y 3 para ST7789 240×240), repinta la pantalla activa (menú sobre el frame pausado, modo USB o pantalla sin episodios) y `Rotation::mapTouch()` rota las coordenadas del CST816T antes de `GestureController`.
 
 ## F4 — WiFi fácil con celular + QR
 

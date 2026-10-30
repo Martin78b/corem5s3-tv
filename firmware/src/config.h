@@ -88,6 +88,24 @@
 #define TOUCH_ADDR 0x15
 #endif
 
+// ── IMU (QMI8658 accelerometer, shared I2C bus on Waveshare) ──
+#ifdef WAVESHARE_154
+#define IMU_ADDR_PRIMARY 0x6B
+#define IMU_ADDR_ALT     0x6A
+#define IMU_POLL_MS      100    // ~10 Hz accelerometer polling in Auto mode
+#define IMU_STABLE_MS    700    // Hold new orientation this long before rotating
+// Axis alignment between QMI8658 and the 240x240 panel (override via build_flags if needed)
+#ifndef IMU_SWAP_XY
+#define IMU_SWAP_XY  0
+#endif
+#ifndef IMU_INVERT_X
+#define IMU_INVERT_X 1
+#endif
+#ifndef IMU_INVERT_Y
+#define IMU_INVERT_Y 0
+#endif
+#endif
+
 // ── Battery (Waveshare) ──
 #ifdef WAVESHARE_154
 #define BAT_ADC_PIN  1   // GPIO1 - ADC battery voltage (divider x3)
