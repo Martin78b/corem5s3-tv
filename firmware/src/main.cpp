@@ -17,12 +17,15 @@
 #ifdef WAVESHARE_154
 #include "auto_off.h"
 #include "backlight.h"
+#include "clock.h"
 #include "es8311.h"
 #include "gesture_control.h"
 #include "menu.h"
 #include "rotation.h"
 #include "settings.h"
 #include "usb_msc.h"
+#include "web_upload.h"
+#include "wifi_setup.h"
 #include <driver/i2c.h>
 #endif
 
@@ -42,16 +45,29 @@ static VideoFile s_episodes[MAX_EPISODES];
 static int s_episodeCount = 0;
 static int s_currentEpisode = -1;
 static uint16_t *s_framebuffer = nullptr;
+// Waveshare without PSRAM: no full framebuffer (115 KB would leave too little
+// internal RAM for the tasks, I2S and WiFi). Decoded JPEG blocks go straight
+// to the display, and the static is drawn from s_noisePool.
+static bool s_directDraw = false;
+// Noise generated once at boot (esp_random is too slow to run per frame while
+// pushing strips: the refresh was visible as a slow sweep). Each static frame
+// pushes strips from random offsets inside the pool, so it only costs the SPI
+// transfer, like the full-framebuffer path.
+static uint16_t *s_noisePool = nullptr;
+static constexpr int STRIP_ROWS = 16;
+static constexpr int NOISE_POOL_ROWS = 40;  // 19 KB
 static std::atomic<bool> s_playing{false};  // Read by audioTask (core 0)
 
 // App state machine. Written by loop() (core 1); touchTask (core 0) reads it
 // to decide what gestures mean.
 enum class AppState : uint8_t {
-  STATIC,     // TV static: boot, between episodes, channel change
-  PLAYING,    // Episode playing (or finishing)
-  MENU,       // Settings menu open, playback paused
-  USB_MSC,    // SD card exposed to PC over USB Mass Storage (F6)
-  POWER_OFF,  // CRT-off animation, then deep sleep
+  STATIC,      // TV static: boot, between episodes, channel change
+  PLAYING,     // Episode playing (or finishing)
+  MENU,        // Settings menu open, playback paused
+  USB_MSC,     // SD card exposed to PC over USB Mass Storage (F6)
+  WIFI_SETUP,  // SoftAP + QR + captive portal for WiFi provisioning (F4)
+  UPLOAD,      // Web page to upload episodes to the SD over WiFi (F5.3)
+  POWER_OFF,   // CRT-off animation, then deep sleep
 };
 static std::atomic<AppState> s_appState{AppState::STATIC};
 static uint32_t s_channelOsdStart = 0;
@@ -81,6 +97,8 @@ static std::atomic<uint32_t> s_touchCount{0};
 static uint8_t s_sleepMenuOption = AutoOff::SLEEP_OFF;  // Edited by the menu
 static AutoOff::Status s_autoOff = {AutoOff::Source::NONE, 0, false};
 static bool s_usbModeRequested = false;
+static bool s_wifiSetupRequested = false;
+static bool s_uploadRequested = false;
 static bool s_usbPromptActive = false;
 static uint32_t s_usbPromptStart = 0;
 static uint32_t s_consumedTouchCount = 0;
@@ -149,6 +167,17 @@ static void tickUsbMode(bool pwrShort);
 static bool tickUsbPrompt();
 static void showUsbPromptOSD(Gfx &g);
 static void drawUsbModeScreen();
+static void enterWifiSetup();
+static void leaveWifiSetup();
+static void tickWifiSetup(bool pwrShort, bool boot, bool plus);
+static void enterUploadMode();
+static void leaveUploadMode();
+static void tickUploadMode(bool pwrShort);
+static void reloadEpisodesAndPlay();
+static void releaseVideoBuffers();
+static void drawDirectBlock(int x, int y, int w, int h, uint16_t *pixels,
+                            int stride);
+static void restoreVideoBuffers();
 static void showNoEpisodesScreen();
 static void applyRotationIfNeeded();
 static void i2c_scan();
@@ -205,11 +234,12 @@ static void touchTask(void *arg) {
       s_gesture.resetTracking();
     }
 
-    // Menu abierto o modo USB: los gestos se vuelven eventos para loop() y no
-    // tocan volumen/brillo. Al cambiar de modo se descarta el gesto a medias y
-    // se adoptan los niveles del menu (loop() los escribe antes de cambiar el estado).
+    // Menu abierto, modo USB o WiFi setup: los gestos se vuelven eventos para
+    // loop() y no tocan volumen/brillo. Al cambiar de modo se descarta el gesto
+    // a medias y se adoptan los niveles del menu.
     AppState st = s_appState.load();
-    bool uiMode = (st == AppState::MENU || st == AppState::USB_MSC);
+    bool uiMode = (st == AppState::MENU || st == AppState::USB_MSC ||
+                   st == AppState::WIFI_SETUP || st == AppState::UPLOAD);
     if (uiMode != menuMode) {
       menuMode = uiMode;
       s_gesture.setMenuMode(uiMode, s_settings.volumePct, s_settings.brightnessPct);
@@ -228,6 +258,11 @@ static void touchTask(void *arg) {
 static void powerOff() {
   if (s_appState == AppState::USB_MSC) {
     UsbMsc::leave();
+  } else if (s_appState == AppState::WIFI_SETUP) {
+    WifiSetup::stop();
+  } else {
+    if (s_appState == AppState::UPLOAD) WebUpload::stop();
+    WifiSetup::stopRadio();
   }
   s_appState = AppState::POWER_OFF;
   Backlight::setBrightness(s_settings.brightnessPct);
@@ -286,6 +321,35 @@ static bool buttonPressed(DebouncedButton &btn) {
 }
 #else
 static void checkPowerOff() {}
+#endif
+
+static void haltWithError(const char *msg) {
+  log_e("%s (free heap %u, largest block %u)", msg, (unsigned)ESP.getFreeHeap(),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  Display.setTextSize(2);
+  Display.setTextColor(TFT_RED, TFT_BLACK);
+  Display.drawString(msg, 20, 120);
+  while (true) {
+    checkPowerOff();
+    delay(10);
+  }
+}
+
+#ifdef WAVESHARE_154
+// VideoPlayer direct sink: pushes one decoded block (little-endian RGB565,
+// swapped by the display) inside the caller's startWrite()/endWrite().
+static void drawDirectBlock(int x, int y, int w, int h, uint16_t *pixels,
+                            int stride) {
+  if (stride == w) {
+    Display.setAddrWindow(x, y, w, h);
+    displayWritePixels(pixels, w * h);
+    return;
+  }
+  for (int row = 0; row < h; row++) {
+    Display.setAddrWindow(x, y + row, w, 1);
+    displayWritePixels(pixels + row * stride, w);
+  }
+}
 #endif
 
 void setup() {
@@ -426,6 +490,7 @@ void setup() {
   pinMode(BTN_PLUS, INPUT_PULLUP);
   Rotation::init();
   Rotation::setMode(s_settings.rotation);
+  Clock::init(s_settings.tzOption);
 #endif
 
   if (!initSDCard()) {
@@ -439,17 +504,30 @@ void setup() {
   }
 
   s_framebuffer = (uint16_t *)ps_malloc(DISPLAY_WIDTH * DISPLAY_HEIGHT * 2);
+#ifdef WAVESHARE_154
   if (!s_framebuffer) {
+    // The SD is on SDMMC, not on the display's SPI bus, so pushing pixels
+    // while decoding can't collide with audioTask's SD reads.
+    s_noisePool =
+        (uint16_t *)malloc(DISPLAY_WIDTH * NOISE_POOL_ROWS * 2);
+    s_directDraw = (s_noisePool != nullptr);
+    if (s_directDraw) {
+      CRTEffects::generateStatic(s_noisePool, DISPLAY_WIDTH * NOISE_POOL_ROWS);
+    }
+    VideoPlayer::setDirectSink(drawDirectBlock);
+  }
+#endif
+  if (!s_framebuffer && !s_directDraw) {
     s_framebuffer = (uint16_t *)malloc(DISPLAY_WIDTH * DISPLAY_HEIGHT * 2);
   }
-  if (!s_framebuffer) {
+  if (!s_framebuffer && !s_directDraw) {
     Display.drawString("NO MEMORY", 40, 120);
     while (true) {
       checkPowerOff();
       delay(10);
     }
   }
-  log_i("Framebuffer: %p (PSRAM)", s_framebuffer);
+  log_i("Framebuffer: %s", s_directDraw ? "none (direct draw)" : "full");
 #if DISPLAY_DMA
   s_dmaEnabled = initDisplayDMA();
   log_i("Display DMA: %s", s_dmaEnabled ? "on" : "off (fallback to blocking push)");
@@ -480,6 +558,21 @@ void setup() {
   AutoOff::setIdle(s_settings.idleOffOption);
   AutoOff::activity(millis());
   UsbMsc::init();
+  WifiSetup::init();
+
+  // F5.1: if the RTC has no valid time (e.g. no RTC backup battery), set the
+  // clock from NTP when a network is saved. Done here, before the tasks
+  // start, while there is plenty of free RAM; the radio is off afterwards.
+  if (!Clock::valid() && WifiSetup::hasSavedNetwork()) {
+    Display.setTextDatum(TC_DATUM);
+    Display.setTextSize(1);
+    Display.setTextColor(Display.color565(0, 120, 40), TFT_BLACK);
+    Display.drawString("Sincronizando hora...", DISPLAY_WIDTH / 2, 4);
+    if (WifiSetup::connectSaved(BOOT_WIFI_CONNECT_MS)) Clock::syncNtp();
+    WifiSetup::stopRadio();
+    Display.fillRect(0, 0, DISPLAY_WIDTH, 14, TFT_BLACK);
+    Display.setTextDatum(TL_DATUM);
+  }
 #endif
 
   s_episodeCount = VideoPlayer::scanEpisodes(s_episodes, MAX_EPISODES);
@@ -499,9 +592,15 @@ void setup() {
   // log_i("Found %d episodes", s_episodeCount);
   // Display.drawString("Found episodes", 10, 210);
 
-  xTaskCreatePinnedToCore(audioTask, "audio", 16384, NULL, 5, NULL, 0);
+  if (xTaskCreatePinnedToCore(audioTask, "audio", 16384, NULL, 5, NULL, 0) !=
+      pdPASS) {
+    haltWithError("AUDIO TASK FAIL");
+  }
 #ifdef WAVESHARE_154
-  xTaskCreatePinnedToCore(touchTask, "touch", 8192, NULL, 1, NULL, 0);
+  if (xTaskCreatePinnedToCore(touchTask, "touch", 8192, NULL, 1, NULL, 0) !=
+      pdPASS) {
+    haltWithError("TOUCH TASK FAIL");
+  }
   if (s_episodeCount == 0) {
     showNoEpisodesScreen();
     return;
@@ -533,6 +632,14 @@ void loop() {
 
     if (s_appState == AppState::USB_MSC) {
       tickUsbMode(pwrShort);
+      return;
+    }
+    if (s_appState == AppState::WIFI_SETUP) {
+      tickWifiSetup(pwrShort, boot, plus);
+      return;
+    }
+    if (s_appState == AppState::UPLOAD) {
+      tickUploadMode(pwrShort);
       return;
     }
     if (s_appState == AppState::MENU) {
@@ -650,12 +757,18 @@ static uint32_t readFrame(uint32_t &index, uint32_t audioFrame) {
 // Blocking path: decode, push the whole frame, then draw the OSD on top.
 static void showFrame(uint32_t audioFrame) {
   if (readFrame(s_nextFrameToShow, audioFrame) == 0) return;
-  if (!s_video.decodeFrame(s_framebuffer)) return;
-
-  Display.startWrite();
-  Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-  displayWritePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
-  Display.endWrite();
+  if (s_directDraw) {
+    Display.startWrite();
+    bool ok = s_video.decodeFrame(nullptr);  // Blocks go to drawDirectBlock()
+    Display.endWrite();
+    if (!ok) return;
+  } else {
+    if (!s_video.decodeFrame(s_framebuffer)) return;
+    Display.startWrite();
+    Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    displayWritePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
+    Display.endWrite();
+  }
   s_nextFrameToShow++;
 
   composeOSD(Display);
@@ -704,14 +817,27 @@ static void composeOSD(Gfx &g) {
 // Sprites must be created before initDMA(): once DMA is on, TFT_eSprite
 // allocates in internal RAM, where two full frames don't fit.
 static bool initDisplayDMA() {
+  if (!psramFound()) return false;
   for (auto &f : s_frames) {
     f.setColorDepth(16);
-    if (!f.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT)) return false;
+    if (!f.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT)) {
+      for (auto &s : s_frames) s.deleteSprite();
+      return false;
+    }
   }
   s_dmaBounce = (uint16_t *)heap_caps_malloc(
       DISPLAY_WIDTH * DMA_CHUNK_ROWS * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-  if (!s_dmaBounce) return false;
-  return Display.initDMA();
+  if (!s_dmaBounce) {
+    for (auto &s : s_frames) s.deleteSprite();
+    return false;
+  }
+  if (!Display.initDMA()) {
+    heap_caps_free(s_dmaBounce);
+    s_dmaBounce = nullptr;
+    for (auto &s : s_frames) s.deleteSprite();
+    return false;
+  }
+  return true;
 }
 
 // Queues the next band of rows if the DMA is idle. Never blocks, so it can be
@@ -913,6 +1039,13 @@ static void applyRotationIfNeeded() {
         Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
         displayWritePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
         Display.endWrite();
+      } else {
+        // Direct draw: decode the paused frame again from the JPEG buffer
+        // (not possible while it is freed for WiFi).
+        Display.startWrite();
+        bool ok = s_directDraw && s_video.decodeFrame(nullptr);
+        Display.endWrite();
+        if (!ok) Display.fillScreen(TFT_BLACK);
       }
     } else {
       Display.fillScreen(TFT_BLACK);
@@ -923,6 +1056,10 @@ static void applyRotationIfNeeded() {
     if (s_autoOff.warning != AutoOff::Source::NONE) {
       showAutoOffOSD(Display, false);
     }
+  } else if (st == AppState::WIFI_SETUP) {
+    WifiSetup::markDirty();
+  } else if (st == AppState::UPLOAD) {
+    WebUpload::markDirty();
   } else if (s_episodeCount == 0) {
     showNoEpisodesScreen();
     if (s_usbPromptActive) {
@@ -962,6 +1099,15 @@ static void menuFillInfo(SettingsMenu::InfoData &info) {
     snprintf(info.sleep, sizeof(info.sleep), "%s",
              AutoOff::SLEEP_LABELS[AutoOff::sleepOption()]);
   }
+  WifiSetup::StatusInfo wst;
+  WifiSetup::getStatus(wst);
+  if (wst.ip[0]) {
+    snprintf(info.wifi, sizeof(info.wifi), "%s", wst.ip);
+  } else if (wst.hasSaved) {
+    snprintf(info.wifi, sizeof(info.wifi), "%s", wst.ssid);
+  } else {
+    snprintf(info.wifi, sizeof(info.wifi), "NO");
+  }
 }
 
 static void menuApplySleep(uint8_t option) { AutoOff::setSleep(option, millis()); }
@@ -973,10 +1119,39 @@ static void menuApplyIdle(uint8_t option) {
 
 static void menuRequestUsbMode() { s_usbModeRequested = true; }
 
+static void menuRequestWifiSetup() { s_wifiSetupRequested = true; }
+
+static bool menuTestWifi() {
+  releaseVideoBuffers();
+  if (!WifiSetup::connectSaved()) return false;
+  Clock::syncNtp();  // F5.1: refresh the clock while connected
+  return true;
+}
+
+static void menuApplyTimezone(uint8_t option) { Clock::setTimezone(option); }
+
+static const char *menuSyncClock() {
+  if (!WifiSetup::hasSavedNetwork()) return "SIN RED WIFI";
+  releaseVideoBuffers();
+  if (!WifiSetup::connectSaved()) return "SIN CONEXION";
+  return Clock::syncNtp() ? nullptr : "ERROR NTP";
+}
+
+static void menuRequestUpload() { s_uploadRequested = true; }
+
+static void menuForgetWifi() {
+  WifiSetup::forgetNetwork();
+  s_settings.wifiEnabled = false;
+  SettingsStore::save(s_settings);
+  s_savedSettings = s_settings;
+}
+
 // Pauses playback and opens the menu over the frozen frame.
 static void openMenu() {
   s_usbPromptActive = false;
   s_usbModeRequested = false;
+  s_wifiSetupRequested = false;
+  s_uploadRequested = false;
   s_settings.volumePct = s_gesture.getVolumePct();
   s_settings.brightnessPct = s_gesture.getBrightnessPct();
 
@@ -990,11 +1165,15 @@ static void openMenu() {
   s_menu.open(s_settings,
               {menuApplyVolume, menuApplyBrightness, menuApplyRotation,
                menuFillInfo, &s_sleepMenuOption, menuApplySleep, menuApplyIdle,
-               menuRequestUsbMode});
+               menuRequestUsbMode, menuRequestWifiSetup, menuTestWifi,
+               menuForgetWifi, menuApplyTimezone, menuSyncClock,
+               menuRequestUpload});
 }
 
 // Saves what changed and resumes. The next video frame repaints the screen.
 static void closeMenu() {
+  WifiSetup::stopRadio();
+  restoreVideoBuffers();
   if (s_settings != s_savedSettings) {
     SettingsStore::save(s_settings);
     s_savedSettings = s_settings;
@@ -1037,17 +1216,105 @@ static void tickMenu(bool pwrShort, bool boot, bool plus) {
   if (!s_menu.tick(hasInput ? &input : nullptr)) {
     if (s_usbModeRequested) {
       s_usbModeRequested = false;
+      WifiSetup::stopRadio();
+      restoreVideoBuffers();
       if (s_settings != s_savedSettings) {
         SettingsStore::save(s_settings);
         s_savedSettings = s_settings;
       }
       enterUsbMode();
+    } else if (s_wifiSetupRequested) {
+      s_wifiSetupRequested = false;
+      if (s_settings != s_savedSettings) {
+        SettingsStore::save(s_settings);
+        s_savedSettings = s_settings;
+      }
+      enterWifiSetup();
+    } else if (s_uploadRequested) {
+      s_uploadRequested = false;
+      if (s_settings != s_savedSettings) {
+        SettingsStore::save(s_settings);
+        s_savedSettings = s_settings;
+      }
+      enterUploadMode();
     } else {
       closeMenu();
     }
     return;
   }
   delay(10);
+}
+
+// ── WiFi setup & captive portal (F4) ──
+
+// Without PSRAM the JPEG buffer (up to 64 KB) lives in internal RAM. Playback is
+// paused while WiFi is on, so it is freed to give the WiFi stack (~60 KB) room
+// and allocated again before resuming. With PSRAM it is kept.
+static bool s_videoBuffersReleased = false;
+
+static void releaseVideoBuffers() {
+  if (s_videoBuffersReleased || psramFound()) return;
+  s_video.releaseBuffer();
+  s_videoBuffersReleased = true;
+  log_i("Video buffers released, largest free block: %u",
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+}
+
+// Called once the radio is off (esp_wifi_deinit frees its memory). If the
+// heap is too fragmented to get the buffer back, reboot: the WiFi
+// credentials are already in NVS.
+static void restoreVideoBuffers() {
+  if (!s_videoBuffersReleased) return;
+  if (!s_video.begin()) {
+    log_e("Cannot reallocate video buffers after WiFi, restarting");
+    delay(100);
+    esp_restart();
+  }
+  s_videoBuffersReleased = false;
+}
+
+static void enterWifiSetup() {
+  s_usbPromptActive = false;
+  xQueueReset(s_uiQueue);
+  releaseVideoBuffers();
+  if (!WifiSetup::start()) {
+    Display.fillScreen(TFT_BLACK);
+    Display.setTextSize(2);
+    Display.setTextColor(TFT_RED, TFT_BLACK);
+    Display.drawString("WIFI INIT FAIL", 24, 100);
+    delay(1500);
+    closeMenu();
+    return;
+  }
+  s_appState = AppState::WIFI_SETUP;
+}
+
+static void leaveWifiSetup() {
+  WifiSetup::stop();
+  xQueueReset(s_uiQueue);
+  if (WifiSetup::consumeSavedFlag()) {
+    s_settings.wifiEnabled = true;
+    SettingsStore::save(s_settings);
+    s_savedSettings = s_settings;
+  }
+  closeMenu();
+}
+
+static void tickWifiSetup(bool pwrShort, bool boot, bool plus) {
+  bool gestureToggle = false;
+  GestureResult g;
+  while (xQueueReceive(s_uiQueue, &g, 0) == pdTRUE) {
+    if (g == GestureResult::TAP || g == GestureResult::SWIPE_LEFT ||
+        g == GestureResult::SWIPE_RIGHT) {
+      gestureToggle = true;
+    }
+  }
+  bool toggleQr = boot || plus || gestureToggle;
+  if (WifiSetup::tick(toggleQr, pwrShort)) {
+    leaveWifiSetup();
+    return;
+  }
+  delay(15);
 }
 
 // ── USB Mass Storage mode (F6) ──
@@ -1163,7 +1430,12 @@ static void leaveUsbMode() {
   UsbMsc::leave();
   Backlight::setBrightness(s_settings.brightnessPct);
   xQueueReset(s_uiQueue);
+  reloadEpisodesAndPlay();
+}
 
+// After the SD contents may have changed (USB mode, web upload): rescan the
+// episodes, rebuild the playlist and start playing again.
+static void reloadEpisodesAndPlay() {
   drawSdReloadScreen("LEYENDO SD", "Un momento...", TFT_CYAN);
 
   bool sdOk = false;
@@ -1204,6 +1476,69 @@ static void leaveUsbMode() {
   showTVStatic(CHANNEL_STATIC_MS);
   s_channelNumber = 1;
   playEpisode(s_playlist[0]);
+}
+
+// ── Episode upload over WiFi (F5.3) ──
+
+// Connects to the saved network, stops playback (files may be replaced or
+// deleted) and serves the upload page. Called with the menu just closed.
+static void enterUploadMode() {
+  s_usbPromptActive = false;
+  xQueueReset(s_uiQueue);
+  releaseVideoBuffers();
+
+  WifiSetup::StatusInfo wst;
+  WifiSetup::getStatus(wst);
+  drawSdReloadScreen("CONECTANDO", wst.ssid, TFT_CYAN);
+  if (!WifiSetup::connectSaved()) {
+    drawSdReloadScreen("ERROR WIFI", "No se pudo conectar", TFT_RED);
+    delay(2000);
+    closeMenu();
+    return;
+  }
+  Clock::syncNtp();  // F5.1: refresh the clock while connected
+
+  s_playing = false;
+#if DISPLAY_DMA
+  s_frontReady = false;
+#endif
+  xSemaphoreTake(s_audioMutex, portMAX_DELAY);
+  if (xSemaphoreTake(s_sdMutex, portMAX_DELAY) == pdTRUE) {
+    s_audio.stop();
+    s_video.close();
+    xSemaphoreGive(s_sdMutex);
+  }
+  xSemaphoreGive(s_audioMutex);
+
+  if (!WebUpload::start(s_sdMutex)) {
+    drawSdReloadScreen("ERROR", "No se pudo iniciar", TFT_RED);
+    delay(2000);
+    WifiSetup::stopRadio();
+    restoreVideoBuffers();
+    reloadEpisodesAndPlay();
+    return;
+  }
+  s_appState = AppState::UPLOAD;
+}
+
+static void leaveUploadMode() {
+  WebUpload::stop();
+  WifiSetup::stopRadio();
+  restoreVideoBuffers();
+  xQueueReset(s_uiQueue);
+  reloadEpisodesAndPlay();
+}
+
+static void tickUploadMode(bool pwrShort) {
+  GestureResult g;
+  while (xQueueReceive(s_uiQueue, &g, 0) == pdTRUE) {
+    // Touch does nothing here
+  }
+  if (WebUpload::tick(pwrShort)) {
+    leaveUploadMode();
+    return;
+  }
+  delay(5);
 }
 
 static void tickUsbMode(bool pwrShort) {
@@ -1310,9 +1645,12 @@ static void tickAutoOff(bool &pwrShort, bool &boot, bool &plus) {
   }
 
   const BatteryMonitor::State &bat = BatteryMonitor::getState();
-  bool holdIdle =
-      (bat.valid && bat.charging) || (s_appState == AppState::USB_MSC);
-  s_autoOff = AutoOff::tick(now, holdIdle);
+  bool holdIdle = (bat.valid && bat.charging) ||
+                  (s_appState == AppState::USB_MSC) ||
+                  (s_appState == AppState::WIFI_SETUP) ||
+                  (s_appState == AppState::UPLOAD);
+  s_autoOff = AutoOff::tick(now, holdIdle,
+                            Clock::msUntilOffAt(s_settings.offAtOption));
   if (s_autoOff.expired) powerOff();
 }
 
@@ -1326,6 +1664,10 @@ static void showAutoOffOSD(Gfx &g, bool besideBattery) {
     } else if (rem) {
       snprintf(buf, sizeof(buf), "Z %lum",
                (unsigned long)((rem + AUTO_OFF_MINUTE_MS - 1) / AUTO_OFF_MINUTE_MS));
+    } else if (s_settings.offAtOption != Clock::OFF_AT_NONE &&
+               Clock::valid()) {
+      snprintf(buf, sizeof(buf), "Z %s",
+               Clock::OFF_AT_LABELS[s_settings.offAtOption]);
     }
     if (buf[0]) {
       g.setTextSize(1);
@@ -1539,10 +1881,22 @@ static void showTVStatic(uint32_t durationMs) {
   uint32_t frameTime = 1000 / 25;
 
   while (millis() - start < durationMs) {
-    CRTEffects::generateStatic(s_framebuffer);
     Display.startWrite();
-    Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    displayWritePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
+    if (s_directDraw) {
+      // One address window for the whole screen; the strips are contiguous
+      // runs of the pool starting at a random pixel (so rows also shift).
+      const uint32_t span = DISPLAY_WIDTH * (NOISE_POOL_ROWS - STRIP_ROWS);
+      Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+      for (int y = 0; y < DISPLAY_HEIGHT; y += STRIP_ROWS) {
+        int rows = min(STRIP_ROWS, DISPLAY_HEIGHT - y);
+        uint32_t offset = (esp_random() % span) & ~1u;  // pushPixels reads 32-bit words
+        displayWritePixels(s_noisePool + offset, DISPLAY_WIDTH * rows);
+      }
+    } else {
+      CRTEffects::generateStatic(s_framebuffer);
+      Display.setAddrWindow(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+      displayWritePixels(s_framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
+    }
     Display.endWrite();
     delay(frameTime);
   }
@@ -1647,12 +2001,24 @@ static void showCRTOffAnimation() {
 }
 
 static void showChannelOSD(Gfx &g, int channel) {
-  char buf[16];
-  snprintf(buf, sizeof(buf), "CH %02d", channel);
+  char buf[20];
+  int boxW = 76;
+#ifdef WAVESHARE_154
+  if (Clock::valid()) {
+    // F5.1: the time next to the channel number
+    char hhmm[8];
+    Clock::format(hhmm, sizeof(hhmm));
+    snprintf(buf, sizeof(buf), "CH %02d %s", channel, hhmm);
+    boxW = 84;
+  } else
+#endif
+  {
+    snprintf(buf, sizeof(buf), "CH %02d", channel);
+  }
 
-  int osdX = DISPLAY_WIDTH - 80;
-  g.fillRect(osdX, 4, 76, 22, TFT_BLACK);
-  g.drawRect(osdX, 4, 76, 22, TFT_WHITE);
+  int osdX = DISPLAY_WIDTH - boxW - 4;
+  g.fillRect(osdX, 4, boxW, 22, TFT_BLACK);
+  g.drawRect(osdX, 4, boxW, 22, TFT_WHITE);
   g.setTextSize(1);
   g.setTextColor(TFT_GREEN, TFT_BLACK);
   g.drawString(buf, osdX + 6, 8);

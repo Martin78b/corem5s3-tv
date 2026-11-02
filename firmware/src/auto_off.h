@@ -8,7 +8,7 @@
 // Pure timekeeping: the caller draws the warning and powers off.
 namespace AutoOff {
 
-enum class Source : uint8_t { NONE, SLEEP, IDLE };
+enum class Source : uint8_t { NONE, SLEEP, IDLE, CLOCK };
 
 // Sleep timer options (menu index). The last one powers off when the
 // current episode ends instead of after a fixed time.
@@ -40,10 +40,12 @@ void setIdle(uint8_t option);
 void activity(uint32_t now);  // Any touch or button press
 
 // While `charging`, the inactivity countdown is held (the sleep timer is not).
-Status tick(uint32_t now, bool charging);
+// `clockRemainingMs`: time left to the "power off at" hour (F5.1), or
+// UINT32_MAX if none.
+Status tick(uint32_t now, bool charging, uint32_t clockRemainingMs = UINT32_MAX);
 
 // Input while the warning is shown: inactivity restarts, the sleep timer
-// is switched off.
+// is switched off, and a "power off at" hour is skipped for today.
 void cancelWarning(uint32_t now);
 
 #endif  // WAVESHARE_154

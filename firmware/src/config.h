@@ -158,10 +158,25 @@
 #define USB_DISCONNECT_MS 1000      // USB suspend duration treated as unplug
 #define USB_MODE_BRIGHTNESS_PCT 20  // Dimmed backlight while in USB mode
 
+// ── WiFi setup & captive portal (F4, Waveshare) ──
+#define WIFI_SETUP_TIMEOUT_MS 600000UL   // 10 min idle in WiFi setup mode (a phone on the AP counts as activity)
+#define WIFI_CONNECT_TIMEOUT_MS 30000UL   // Max wait when testing STA credentials
+#define WIFI_CONNECT_MIN_MS 8000UL        // Earliest "wrong password" verdict (after the driver's retry)
+#define WIFI_SUCCESS_DISPLAY_MS 10000UL   // Show "CONECTADO + IP" (AP still up so the phone sees it too)
+#define WIFI_FAIL_DISPLAY_MS 6000UL       // Show "ERROR WIFI" before going back to the portal QR
+
+// ── Clock / NTP (F5.1, Waveshare) ──
+#define NTP_SYNC_TIMEOUT_MS 6000UL        // Max wait for an NTP answer
+#define BOOT_WIFI_CONNECT_MS 8000UL       // Boot-time sync (only if the clock is not valid)
+
+// ── Episode upload over WiFi (F5.3, Waveshare) ──
+#define UPLOAD_IDLE_TIMEOUT_MS 600000UL   // 10 min without requests -> back to playback
+#define UPLOAD_WRITE_BUF 16384            // Bytes gathered before each SD write
+
 // ── Firmware info (shown under the boot logo) ──
 // FW_VERSION / FW_GIT_HASH can be injected with -D at build time (HANDOFF F7.2)
 #ifndef FW_VERSION
-#define FW_VERSION "dev"
+#define FW_VERSION "v0.3.2"
 #endif
 #ifndef FW_GIT_HASH
 #define FW_GIT_HASH ""

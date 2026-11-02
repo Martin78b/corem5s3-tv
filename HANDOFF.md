@@ -293,7 +293,7 @@ CONFIGURACIÓN
 
 Opción elegida (recomendada): **A. Punto de acceso propio + QR + portal cautivo**. No necesita app y funciona en iOS y Android.
 
-- [ ] **F4.1 Flujo**:
+- [x] **F4.1 Flujo**:
   1. Menú → WiFi → Conectar.
   2. Arrancar el SoftAP `CoreTV-XXXX` (sufijo de la MAC) con **contraseña aleatoria nueva en cada intento**.
   3. Mostrar **QR 1**: `WIFI:T:WPA;S:CoreTV-XXXX;P:<pass>;;`. La cámara del teléfono se conecta sola.
@@ -301,13 +301,36 @@ Opción elegida (recomendada): **A. Punto de acceso propio + QR + portal cautivo
   5. Si el portal no se abre solo, mostrar **QR 2** con `http://192.168.4.1`.
   6. Probar la conexión, guardarla en NVS y mostrar "Conectado ✓ + IP". Apagar el AP.
   7. Timeout de 5 min sin uso → salir del modo de configuración.
-- [ ] **F4.2 Librerías**: `ricmoo/QRCode` (generar el QR y dibujarlo con `fillRect`, escalado para 240 px),
-  y WiFiManager (tzapu) **o** un portal propio con `WebServer` + `DNSServer` (más control sobre el estilo).
-- [ ] **F4.3 Recursos**: el WiFi usa unos 60 KB de RAM interna, gasta batería y compite con la reproducción.
+- [x] **F4.2 Librerías**: `qrcode.h` (`libqrcode.a` integrado en el SDK ESP32-S3, dibujado con `fillRect`, escalado para 240 px con quiet zone blanco),
+  y portal cautivo propio con `WebServer` + `DNSServer` (estética CRT verde).
+- [x] **F4.3 Recursos**: el WiFi usa unos 60 KB de RAM interna, gasta batería y compite con la reproducción.
   Encenderlo **solo bajo demanda**; pausar el video durante la configuración.
-- [ ] **F4.4 Menú**: Conectar… / Olvidar red / Estado (SSID, IP, RSSI).
+- [x] **F4.4 Menú**: Conectar… / Olvidar red / Estado (SSID, IP, RSSI).
 - [ ] **F4.5 Complemento opcional**: **Improv WiFi Serial**, para configurar desde el navegador justo después
   de flashear con el flasher web (ESP Web Tools).
+
+  ✅ **F4 aplicado (2026-10-30), pendiente de probar en hardware.** Módulo `wifi_setup.h/.cpp` (Waveshare):
+  - En reposo y durante la reproducción la radio WiFi permanece apagada (`WiFi.mode(WIFI_OFF)`).
+  - Submenú `Menú → WIFI`: muestra el estado actual (`RED`, `IP`, `RSSI`) y las opciones `CONECTAR...` (portal QR), `ESTADO` (conecta bajo demanda a la red guardada para verificar y refrescar IP/RSSI), `OLVIDAR RED` (borra `w_ssid`/`w_pass` de NVS y apaga WiFi) y `VOLVER`. En `Menú → INFO` se muestra la IP (o el SSID guardado / `NO`).
+  - En `AppState::WIFI_SETUP`: arranca el SoftAP `CoreTV-XXXX` con clave aleatoria de 8 caracteres sin ambigüedades, muestra el **QR 1** (`WIFI:T:WPA;S:CoreTV-XXXX;P:<pass>;;`) y, en cuanto un teléfono se asocia al AP (o al pulsar `+`/tocar/deslizar), pasa al **QR 2** (`http://192.168.4.1`).
+  - El portal cautivo (`DNSServer` + `WebServer` en `192.168.4.1`) lista las redes escaneadas ordenadas por RSSI (más opción de SSID manual y botón de reescaneo). Al enviar credenciales, prueba la conexión STA (`15 s` máx.): si conecta, guarda en NVS (`coretv`), apaga el SoftAP y muestra `CONECTADO ✓` con el SSID y la IP durante 4 s antes de apagar la radio y retomar el video; tras 5 min sin actividad (`WIFI_SETUP_TIMEOUT_MS`) o con `PWR` corto, sale automáticamente.
+  - 🔧 2026-11-01: arreglado `VIDEO INIT FAIL` y el cuelgue al empezar la reproducción o al abrir el menú. Causa: enlazar WiFi/lwip/WebServer sube el inicio del heap ~29 KB (`heap_start` 0x3FCAAA18 → 0x3FCB1BB8) y, sin PSRAM (ver P1), el framebuffer de 115 KB y el buffer JPEG de 64 KB en RAM interna dejaban sin memoria las pilas de `audioTask`/`touchTask` y el DMA de I2S (el retorno de `xTaskCreatePinnedToCore` no se verificaba, así que el video esperaba para siempre al audio). Cambios:
+    - Waveshare sin PSRAM: **sin framebuffer completo** (`s_directDraw`). `VideoPlayer::setDirectSink()` hace que `JPEGDraw` envíe cada bloque decodificado directo a la pantalla (`drawDirectBlock()`), y la estática sale de un pool de ruido pregenerado (ver abajo). Es seguro porque la SD va por SDMMC y no comparte el SPI de la pantalla. Al girar con el menú abierto, el frame pausado se vuelve a decodificar desde el buffer JPEG. Con PSRAM, y en M5/genérica, todo sigue igual.
+    - `VideoPlayer::begin()` prueba buffers de 64/48/32/24 KB, y `readNextFrame()` salta entero un frame que no entra, para no desalinear la lectura.
+    - Con el WiFi encendido (`CONECTAR...` y `ESTADO`), y sin PSRAM, se libera el buffer JPEG (`releaseVideoBuffers()`) y se vuelve a pedir al apagar la radio (`restoreVideoBuffers()`, en `closeMenu()` y antes del modo USB). Si no se puede, el equipo se reinicia (las credenciales ya están en NVS).
+    - Si no se puede crear `audioTask` o `touchTask`, se muestra `AUDIO TASK FAIL` / `TOUCH TASK FAIL` en vez de colgarse sin aviso.
+    - Estática sin framebuffer: generar el ruido con `esp_random()` mientras se enviaban las franjas hacía visible el barrido. Ahora se genera una sola vez al arrancar un pool de 40 filas (`s_noisePool`, 19 KB), y cada frame envía franjas de 16 filas desde posiciones al azar del pool, en una sola ventana de dirección.
+  - 🔧 2026-11-01, ajustes del flujo WiFi tras la prueba en hardware (no conectaba: la red del AP se caía y, al reintentar, la clave cambiaba):
+    - **La clave del SoftAP se mantiene hasta el próximo reinicio** (antes cambiaba en cada intento), así el teléfono puede volver a unirse solo.
+    - `start()` escanea antes de levantar el AP y lo pone en el **canal de la red más fuerte**: con una sola radio, si la STA se une a una red de otro canal, el AP cambia de canal y el teléfono se desconecta. `WiFi.begin()` recibe canal y BSSID del escaneo.
+    - Tiempos: prueba de conexión 15 → 30 s (`WIFI_CONNECT_TIMEOUT_MS`), sin corte anticipado por `WL_CONNECT_FAILED` (aparece de forma transitoria durante los reintentos); inactividad 5 → 10 min, y un teléfono asociado al AP cuenta como actividad; "ERROR WIFI" 6 s (`WIFI_FAIL_DISPLAY_MS`); "CONECTADO" 10 s.
+    - El AP sigue encendido mientras se muestra "CONECTADO" (se apaga con `stop()` al terminar), y la página "PROBANDO CONEXION" consulta `/status` cada 1.5 s y muestra el resultado (IP o error con "VOLVER A INTENTAR") en el teléfono.
+  - 🔧 2026-11-01, la conexión desde el portal fallaba siempre. Sin log serie no se pudo ver el motivo exacto, así que se cubrieron las causas probables y se agregó diagnóstico:
+    - `beginSta()` (portal y `ESTADO`): `setMinSecurity(WIFI_AUTH_WEP)` (con el WPA2 por defecto de Arduino, un router WPA/TKIP se ignora y parece "red no encontrada"), `WIFI_ALL_CHANNEL_SCAN` ordenado por señal y sin fijar canal/BSSID (se quitó lo agregado en el ajuste anterior: falla con redes mesh o si el router cambió de canal).
+    - Ya no se aplica `trim()` a los SSID elegidos de la lista (solo al escrito a mano).
+    - El motivo de desconexión (`ARDUINO_EVENT_WIFI_STA_DISCONNECTED`) se traduce a "Clave incorrecta", "Red no encontrada", "El router la rechazo", "Senal muy debil", "Sin IP del router (DHCP)" o "Error WiFi (motivo N)", y se muestra en la pantalla de error del TV y en el teléfono (`/status`, campo `r`).
+    - Con clave incorrecta (`WL_CONNECT_FAILED`, que Arduino solo marca después de su reintento) el error sale a los 8 s (`WIFI_CONNECT_MIN_MS`) en vez de esperar los 30 s.
+  - 🔧 2026-11-01, **causa real** de "Sin respuesta del router" (y de que antes "se apagara la red"): en `WifiSetup::tick()` se leía `now = millis()` **antes** de `handleClient()`, y los handlers del portal guardan `s_stepStartMs` / `s_lastActivityMs = millis()`, que quedaban por delante de `now`. `now - start` (sin signo) daba ~4e9, así que el timeout de conexión vencía en la misma vuelta del envío (FAIL sin intentar: sin eventos, motivo 0) y cargar una página disparaba el timeout de inactividad y apagaba el AP. Fix: leer `now` después de atender DNS/HTTP.
 
 Alternativas descartadas o secundarias:
 - **Espressif Provisioning (BLE/SoftAP)**: el QR lo lee una app oficial. Seguro, pero obliga a instalar una app y BLE consume más memoria.
@@ -315,13 +338,27 @@ Alternativas descartadas o secundarias:
 
 ## F5 — Extras que habilita el WiFi (decidir cuál primero)
 
-- [ ] **F5.1 Hora NTP** → guardarla en el RTC (PCF85063 en Waveshare, `0x51`; BM8563 en M5).
+- [x] **F5.1 Hora NTP** → guardarla en el RTC (PCF85063 en Waveshare, `0x51`; BM8563 en M5).
   Permite un reloj en el OSD/menú y apagar a una hora ("apagar a las 23:00").
+  ✅ Aplicado (2026-11-01), solo Waveshare, **sin probar en hardware**. Módulo `clock.h/.cpp`:
+  - RTC PCF85063 en `I2C_NUM_1` (`0x51`), guardado en **UTC** (BCD, registros 0x04–0x0A). Al arrancar, `Clock::init()` lo lee y hace `settimeofday()` si el bit OS (oscilador detenido) está en 0 y la fecha es ≥ 2024. Al escribir se limpian STOP y 12/24 de Control_1 sin tocar el resto (p. ej. CAP_SEL).
+  - NTP (`configTzTime` + `pool.ntp.org`/`time.google.com`/`time.cloudflare.com`, 6 s máx., `NTP_SYNC_TIMEOUT_MS`), luego `sntp_stop()` y escritura del RTC. Se sincroniza cada vez que hay STA conectada: tras `CONECTAR...` (en la pantalla CONECTADO, que pasa a mostrar la hora), `ESTADO`, `SUBIR EPISODIOS` y el ítem nuevo `HORA`. Si al arrancar el reloj no es válido y hay red guardada, se sincroniza una vez antes de crear las tareas (`BOOT_WIFI_CONNECT_MS` 8 s + NTP), con "Sincronizando hora..." arriba.
+  - Zona horaria: offset fijo `UTC-12`…`UTC+14` (ítem `ZONA`, `Settings::tzOption`, por defecto UTC-3), sin horario de verano ni zonas de media hora.
+  - Menú: `APAGAR A` (NO / 20:00 … 02:00, en NVS, `Settings::offAtOption`), `HORA` (muestra la hora; al elegirla sincroniza por NTP) y `ZONA`. La lista principal tiene ahora 12 ítems y **hace scroll** (9 visibles, `^`/`v` en el título). INFO tiene una línea `HORA`.
+  - `AutoOff` tiene una fuente nueva `CLOCK`: `tick(now, charging, Clock::msUntilOffAt(...))`. Usa el mismo aviso de 60 s; cancelarlo salta el apagado de ese día (se rearma cuando la hora pasa y lo restante vuelve a ~24 h). Si no hay hora válida, `APAGAR A` no hace nada. Indicador `Z 23:00` junto a la batería.
+  - OSD: la hora aparece junto al número de canal (`CH 01 14:32`).
+  - M5 (BM8563) queda fuera: su entorno no tiene WiFi.
 - [ ] **F5.2 OTA**: requiere una tabla de particiones con `ota_0/ota_1`. **Ojo:** el entorno
   `waveshare-s3-touch-lcd-154` usa `default_8MB.csv` y `flash_mode = dio`, aunque
   `HARDWARE_REFERENCE.md` indica 16 MB de flash. Verificar el tamaño real antes de cambiarlo.
-- [ ] **F5.3 Subir episodios desde el navegador** (lento por SD + WiFi; útil para pocos archivos).
+- [x] **F5.3 Subir episodios desde el navegador** (lento por SD + WiFi; útil para pocos archivos).
   **Prioridad baja:** F6 (modo USB) cubre mejor este caso, porque la conversión ya se hace en la PC.
+  ✅ Aplicado (2026-11-01), solo Waveshare, **sin probar en hardware**. Módulo `web_upload.h/.cpp`, estado nuevo `AppState::UPLOAD`:
+  - `Menú → WIFI → SUBIR EPISODIOS` (requiere red guardada): conecta la STA, sincroniza la hora, detiene la reproducción (cierra `s_audio`/`s_video`, como el modo USB) y levanta `WebServer` en el puerto 80. La pantalla muestra un QR con `http://<IP>/` (`WifiSetup::drawQrScreen()`, ahora pública) y una línea de estado con el progreso.
+  - Página (estética CRT): lista de `.mjpeg`/`.pcm` de la raíz con tamaño y botón de borrar, espacio libre, subida múltiple por XHR (un archivo por petición, con barra de progreso) y botón `TERMINAR`.
+  - Subida: solo nombres simples `.mjpeg`/`.pcm` (sin rutas, sin `.` inicial, que entren en `EPISODE_PATH_MAX`); se rechaza si `Content-Length` supera el espacio libre. Se escribe en `/.upload.tmp` en bloques de 16 KB (`UPLOAD_WRITE_BUF`) con `s_sdMutex`, y al terminar se borra el destino (si existía) y se renombra: una subida cortada nunca pisa un episodio bueno.
+  - Salida: `TERMINAR`, `PWR` corto, 10 min sin peticiones (`UPLOAD_IDLE_TIMEOUT_MS`) o WiFi caído 10 s. Luego se apaga la radio, se recupera el buffer JPEG y `reloadEpisodesAndPlay()` (extraída de `leaveUsbMode()`) reescanea, rehace la playlist y reproduce.
+  - Limitaciones: `WebServer` procesa toda la petición dentro de `handleClient()`, así que durante un archivo `loop()` no corre (no responde a botones ni a PWR largo; el progreso se dibuja desde el callback). Velocidad esperada: unos cientos de KB/s. Sin autenticación (pensado para la red de casa). La inactividad se congela en este modo; el sleep timer y `APAGAR A` se respetan.
 - [ ] **F5.4 Streaming desde NAS/Jellyfin** (ya en el roadmap del README). Lo más exigente. No priorizado.
 
 ## F6 — Modo USB: exponer la SD a la PC (Mass Storage)

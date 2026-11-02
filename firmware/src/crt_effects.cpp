@@ -30,7 +30,10 @@ void CRTEffects::applyNoise(uint16_t* framebuffer) {
 }
 
 void CRTEffects::generateStatic(uint16_t* framebuffer) {
-  int total = DISPLAY_WIDTH * DISPLAY_HEIGHT;
+  generateStatic(framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT);
+}
+
+void CRTEffects::generateStatic(uint16_t* framebuffer, int total) {
   uint32_t* p = (uint32_t*)framebuffer;
   for (int i = 0; i < total / 2; i++) {
     uint8_t g = esp_random() & 0xFF;

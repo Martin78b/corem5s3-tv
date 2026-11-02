@@ -2,20 +2,37 @@
 
 uint16_t* VideoPlayer::_drawTarget = nullptr;
 void (*VideoPlayer::_drawHook)() = nullptr;
+VideoPlayer::DirectSink VideoPlayer::_directSink = nullptr;
 
 VideoPlayer::VideoPlayer()
   : _frameCount(0), _currentFrame(0), _fps(VIDEO_FPS), _sampleRate(AUDIO_SAMPLE_RATE),
     _jpegBuf(nullptr), _jpegBufSize(0), _currentFrameSize(0) {}
 
 bool VideoPlayer::begin() {
-  _jpegBuf = (uint8_t*)malloc(65536);
-  if (!_jpegBuf) _jpegBuf = (uint8_t*)ps_malloc(65536);
-  if (!_jpegBuf) {
-    log_e("Failed to allocate JPEG buffer");
-    return false;
+  if (_jpegBuf) return true;
+  // Without PSRAM this lives in internal RAM, where a 64 KB contiguous block
+  // may not exist. Fall back to smaller buffers: a 240x240 frame at the
+  // default quality is well under 32 KB, and larger frames are skipped by
+  // readNextFrame().
+  static const size_t kSizes[] = {65536, 49152, 32768, 24576};
+  for (size_t size : kSizes) {
+    _jpegBuf = (uint8_t*)malloc(size);
+    if (!_jpegBuf) _jpegBuf = (uint8_t*)ps_malloc(size);
+    if (_jpegBuf) {
+      _jpegBufSize = size;
+      log_i("JPEG buffer: %u bytes", (unsigned)size);
+      return true;
+    }
   }
-  _jpegBufSize = 65536;
-  return true;
+  log_e("Failed to allocate JPEG buffer");
+  return false;
+}
+
+void VideoPlayer::releaseBuffer() {
+  free(_jpegBuf);
+  _jpegBuf = nullptr;
+  _jpegBufSize = 0;
+  _currentFrameSize = 0;
 }
 
 bool VideoPlayer::openFile(const char* path) {
@@ -77,6 +94,12 @@ uint32_t VideoPlayer::readNextFrame() {
 
   if (frameSize == 0 || frameSize > _jpegBufSize) {
     log_w("Bad frame size: %u (max %u)", frameSize, _jpegBufSize);
+    // A frame that is valid but larger than the (possibly reduced) buffer is
+    // skipped whole, so the next read stays aligned to a frame header.
+    if (frameSize > 0 && frameSize <= (uint32_t)_file.available()) {
+      _file.seek(_file.position() + frameSize + (frameSize & 1));
+      _currentFrame++;
+    }
     return 0;
   }
 
@@ -94,6 +117,7 @@ uint32_t VideoPlayer::readNextFrame() {
 }
 
 bool VideoPlayer::decodeFrame(uint16_t* framebuffer, bool bigEndian) {
+  if (!_jpegBuf || _currentFrameSize == 0) return false;
   _drawTarget = framebuffer;
 
   if (!_jpeg.openRAM(_jpegBuf, _currentFrameSize, JPEGDraw)) {
@@ -120,7 +144,7 @@ int VideoPlayer::currentFrame() { return _currentFrame; }
 float VideoPlayer::frameTimeMs() { return 1000.0f / _fps; }
 
 int VideoPlayer::JPEGDraw(JPEGDRAW* draw) {
-  if (!_drawTarget) return 0;
+  if (!_drawTarget && !_directSink) return 0;
   // Clip to the framebuffer: a frame larger than the display (e.g. 320x240
   // on a 240x240 board) would otherwise write past the end of it.
   if (draw->x >= DISPLAY_WIDTH || draw->y >= DISPLAY_HEIGHT) return 1;
@@ -128,6 +152,11 @@ int VideoPlayer::JPEGDraw(JPEGDRAW* draw) {
   int h = draw->iHeight;
   if (draw->x + w > DISPLAY_WIDTH) w = DISPLAY_WIDTH - draw->x;
   if (draw->y + h > DISPLAY_HEIGHT) h = DISPLAY_HEIGHT - draw->y;
+
+  if (!_drawTarget) {
+    _directSink(draw->x, draw->y, w, h, (uint16_t*)draw->pPixels, draw->iWidth);
+    return 1;
+  }
 
   uint16_t* dst = _drawTarget + draw->y * DISPLAY_WIDTH + draw->x;
   uint16_t* src = (uint16_t*)draw->pPixels;

@@ -139,9 +139,13 @@ Short press **PWR** while an episode plays to open the menu. Video and audio pau
 | VOLUMEN | 0–100 % (steps of 10) |
 | BRILLO | 10–100 % (steps of 10) |
 | APAGADO | Sleep timer: NO / 15m / 30m / 60m / 2h / 4h / FIN EP (when the current episode ends). Counts from when it is set; not saved |
+| APAGAR A | Power off every day at a clock time: NO / 20:00 … 02:00. Saved; needs a valid clock (see below) |
 | INACTIVIDAD | Power off after this long without touches or button presses: NO / 1h / 2h / 4h (default 2h). Held while the battery is charging or in USB mode |
+| HORA | Current time. Select it to set the clock from the internet (NTP) over the saved WiFi network |
+| ZONA | Time zone as a fixed UTC offset, UTC-12 … UTC+14 (default UTC-3, no daylight saving). Saved |
+| WIFI | Sub-page: CONECTAR... (QR + captive portal), ESTADO, SUBIR EPISODIOS, OLVIDAR RED |
 | MODO USB | Unmounts the SD card from the firmware and exposes it to a connected PC as a USB Mass Storage drive |
-| INFO | Firmware version, battery %, voltage, episode count, sleep time left |
+| INFO | Firmware version, battery %, voltage, episode count, time, sleep time left, WiFi |
 | SALIR | Close the menu |
 
 | Action | Buttons | Touch |
@@ -154,6 +158,18 @@ Short press **PWR** while an episode plays to open the menu. Video and audio pau
 The menu closes by itself after 10 s without input. Volume, brightness and INACTIVIDAD are saved to flash (NVS) and restored at boot; volume and brightness are saved both when set in the menu and when changed with swipes (saved 5 s after the last change).
 
 While the sleep timer runs, the time left (e.g. `Z 25m`) shows beside the battery icon. One minute before an automatic power-off, a warning appears: any touch or button cancels it (the inactivity count restarts, the sleep timer is switched off) without changing channel.
+
+### Clock (Waveshare)
+
+The time is kept by the board's PCF85063 RTC (in UTC) and set from NTP whenever the device connects to WiFi: after **WIFI → CONECTAR...**, **WIFI → ESTADO**, **HORA**, or **SUBIR EPISODIOS**. If the RTC has no valid time at boot (for example, no RTC backup battery) and a network is saved, the device syncs once during boot (`Sincronizando hora...`, up to ~15 s). The time shows next to the channel number, in the menu (HORA, INFO), and `APAGAR A` uses it: the same 1-minute warning as the sleep timer appears first, and cancelling it skips that day's power-off.
+
+### Upload Episodes over WiFi (Waveshare)
+
+**Menu → WIFI → SUBIR EPISODIOS** connects to the saved network, stops playback and shows a QR code with the device's address (e.g. `http://192.168.1.50/`). Open it in a browser on the same network to:
+- upload `.mjpeg` and `.pcm` files to the root of the SD card (several at once, with progress; a file with the same name is replaced; files are written to a temporary name first, so a cut upload never damages an existing episode),
+- delete episodes, and see the free space.
+
+Press **TERMINAR** on the page, or short-press **PWR** on the device, to go back: the SD is rescanned and playback restarts. The mode also ends after 10 minutes without requests. It is slow (WiFi + SD, a few hundred KB/s), so it suits adding a few episodes; for many, use USB mode or a card reader. While a file is being received the device does not react to buttons. There is no password: use it only on a trusted network.
 
 ### USB Mass Storage Mode (Waveshare)
 
@@ -253,6 +269,9 @@ CoreM5S3-TV/
 │       ├── menu.h/.cpp            # On-screen settings menu (Waveshare)
 │       ├── auto_off.h/.cpp        # Sleep timer and inactivity power-off (Waveshare)
 │       ├── usb_msc.h/.cpp         # USB Mass Storage mode for SD card (Waveshare)
+│       ├── wifi_setup.h/.cpp      # WiFi setup: SoftAP + QR + captive portal (Waveshare)
+│       ├── clock.h/.cpp           # RTC (PCF85063) + NTP clock (Waveshare)
+│       ├── web_upload.h/.cpp      # Upload episodes from a browser (Waveshare)
 │       ├── settings.h/.cpp        # Settings persisted in NVS
 │       ├── es8311.h/.cpp          # ES8311 DAC driver (Waveshare)
 │       ├── logo_240.h             # Boot logo for 240x240 displays

@@ -28,6 +28,7 @@ public:
     bool batteryValid;
     bool charging;
     char sleep[12];  // Sleep timer: "NO", "25m", "FIN EP"
+    char wifi[20];   // IP address, saved SSID, or "NO"
   };
 
   struct Callbacks {
@@ -39,6 +40,14 @@ public:
     void (*applySleep)(uint8_t option);
     void (*applyIdle)(uint8_t option);     // Settings::idleOffOption changed
     void (*enterUsbMode)();                // Requests entering USB MSC mode
+    void (*enterWifiSetup)();              // Requests entering WiFi QR setup
+    bool (*testWifi)();                    // Connects to saved WiFi on demand
+    void (*forgetWifi)();                  // Clears saved WiFi credentials
+    void (*applyTimezone)(uint8_t option); // Settings::tzOption changed
+    // Connects to the saved WiFi and sets the clock from NTP (blocking).
+    // Returns nullptr on success, or the error text to show.
+    const char *(*syncClock)();
+    void (*enterUpload)();                 // Requests episode upload mode
   };
 
   void open(Settings &settings, const Callbacks &cb);
@@ -49,8 +58,9 @@ public:
   bool tick(const Input *input);
 
 private:
+  enum class Page : uint8_t { MAIN, WIFI, INFO };
   enum class ItemType : uint8_t { RANGE, ENUM, ACTION };
-  enum class Action : uint8_t { NONE, USB_MODE, INFO, EXIT };
+  enum class Action : uint8_t { NONE, WIFI, USB_MODE, INFO, CLOCK, EXIT };
 
   struct Item {
     const char *label;
@@ -63,11 +73,15 @@ private:
     Action action;                // ACTION
   };
 
-  static const int MAX_ITEMS = 8;
+  static const int MAX_ITEMS = 12;
+  static const int VISIBLE_ROWS = 9;  // The main list scrolls past this
   Item _items[MAX_ITEMS];
   int _count = 0;
   int _selected = 0;
-  bool _infoPage = false;
+  int _scroll = 0;       // First visible row of the main list
+  int _shownMinute = -1; // Redraw when the clock's minute changes
+  int _wifiSelected = 0;
+  Page _page = Page::MAIN;
   bool _open = false;
   bool _dirty = true;
   uint32_t _lastInputMs = 0;
@@ -80,9 +94,12 @@ private:
   void addAction(const char *label, Action action);
   void change(Item &item, int dir, bool wrap);
   bool activate(Item &item);  // Returns false if the menu should close
+  bool tickWifiPage(Input input);
+  void showMessage(const char *text, uint16_t color);
   void formatValue(const Item &item, char *buf, size_t len);
   void draw();
   void drawList();
+  void drawWifi();
   void drawInfo();
 };
 

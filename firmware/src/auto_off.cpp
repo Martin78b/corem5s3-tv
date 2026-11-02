@@ -16,6 +16,8 @@ static uint8_t s_sleepOption = SLEEP_OFF;
 static uint32_t s_sleepStart = 0;
 static uint8_t s_idleOption = IDLE_DEFAULT;
 static uint32_t s_lastActivity = 0;
+static uint32_t s_lastClockRemaining = UINT32_MAX;
+static bool s_clockCancelled = false;  // Until the target hour has passed
 
 // Elapsed-time math (now - start) stays right across the millis() overflow.
 static uint32_t remaining(uint32_t start, uint32_t duration, uint32_t now) {
@@ -51,8 +53,11 @@ void setIdle(uint8_t option) {
 
 void activity(uint32_t now) { s_lastActivity = now; }
 
-Status tick(uint32_t now, bool charging) {
+Status tick(uint32_t now, bool charging, uint32_t clockRemainingMs) {
   if (charging) s_lastActivity = now;
+  s_lastClockRemaining = clockRemainingMs;
+  // After the hour passes, the time left jumps to ~24 h: re-arm for tomorrow
+  if (clockRemainingMs > AUTO_OFF_WARN_MS) s_clockCancelled = false;
 
   Status st = {Source::NONE, 0, false};
   uint32_t sleepD = sleepDurationMs();
@@ -68,6 +73,11 @@ Status tick(uint32_t now, bool charging) {
       best = r;
       st.warning = Source::IDLE;
     }
+  }
+  if (clockRemainingMs != UINT32_MAX && !s_clockCancelled &&
+      clockRemainingMs < best) {
+    best = clockRemainingMs;
+    st.warning = Source::CLOCK;
   }
   if (st.warning == Source::NONE) return st;
 
@@ -85,6 +95,7 @@ void cancelWarning(uint32_t now) {
   if (sleepD && remaining(s_sleepStart, sleepD, now) <= AUTO_OFF_WARN_MS) {
     s_sleepOption = SLEEP_OFF;
   }
+  if (s_lastClockRemaining <= AUTO_OFF_WARN_MS) s_clockCancelled = true;
   s_lastActivity = now;
 }
 

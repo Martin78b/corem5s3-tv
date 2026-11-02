@@ -11,7 +11,8 @@ struct VideoFile {
 class VideoPlayer {
 public:
   VideoPlayer();
-  bool begin();
+  bool begin();  // Allocates the JPEG buffer (no-op if already allocated)
+  void releaseBuffer();  // Frees it; begin() allocates it again
   bool openFile(const char* path);
   uint32_t readNextFrame();
   // bigEndian: write pixels in display byte order (for TFT_eSprite buffers)
@@ -30,6 +31,11 @@ public:
   static void pcmPath(const VideoFile& episode, char* buf, size_t len);
   // Called after each decoded block (e.g. to keep a display DMA transfer fed)
   static void setDrawHook(void (*hook)()) { _drawHook = hook; }
+  // Receives each decoded block (already clipped to the display) when
+  // decodeFrame() is called with a null framebuffer: draw without a frame copy.
+  using DirectSink = void (*)(int x, int y, int w, int h, uint16_t* pixels,
+                              int stride);
+  static void setDirectSink(DirectSink sink) { _directSink = sink; }
 
 private:
   File _file;
@@ -47,4 +53,5 @@ private:
   static int JPEGDraw(JPEGDRAW* draw);
   static uint16_t* _drawTarget;
   static void (*_drawHook)();
+  static DirectSink _directSink;
 };

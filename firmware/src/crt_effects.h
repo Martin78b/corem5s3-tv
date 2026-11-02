@@ -9,6 +9,7 @@ public:
   static void applyScanlines(uint16_t* framebuffer);
   static void applyNoise(uint16_t* framebuffer);
   static void generateStatic(uint16_t* framebuffer);
+  static void generateStatic(uint16_t* buf, int pixels);
   static void applyCurvature(uint16_t* framebuffer);
 
 private:

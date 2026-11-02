@@ -1,6 +1,7 @@
 #include "settings.h"
 
 #include "auto_off.h"
+#include "clock.h"
 #include "rotation.h"
 
 #include <Preferences.h>
@@ -16,6 +17,8 @@ Settings defaults() {
   s.rotation = Rotation::ROT_DEFAULT;
   s.idleOffOption = AutoOff::IDLE_DEFAULT;
   s.wifiEnabled = false;
+  s.tzOption = Clock::TZ_DEFAULT;
+  s.offAtOption = Clock::OFF_AT_NONE;
   return s;
 }
 
@@ -31,6 +34,8 @@ Settings load() {
     s.rotation = prefs.getUChar("rot", s.rotation);
     s.idleOffOption = prefs.getUChar("idle", s.idleOffOption);
     s.wifiEnabled = prefs.getBool("wifi", s.wifiEnabled);
+    s.tzOption = prefs.getUChar("tz", s.tzOption);
+    s.offAtOption = prefs.getUChar("offat", s.offAtOption);
   } else if (schema != 0) {
     log_w("Settings schema %u unknown, using defaults", schema);
   }
@@ -44,6 +49,10 @@ Settings load() {
   }
   if (s.idleOffOption >= AutoOff::IDLE_OPTION_COUNT) {
     s.idleOffOption = AutoOff::IDLE_DEFAULT;
+  }
+  if (s.tzOption >= Clock::TZ_OPTION_COUNT) s.tzOption = Clock::TZ_DEFAULT;
+  if (s.offAtOption >= Clock::OFF_AT_OPTION_COUNT) {
+    s.offAtOption = Clock::OFF_AT_NONE;
   }
   return s;
 }
@@ -60,6 +69,8 @@ void save(const Settings &s) {
   prefs.putUChar("rot", s.rotation);
   prefs.putUChar("idle", s.idleOffOption);
   prefs.putBool("wifi", s.wifiEnabled);
+  prefs.putUChar("tz", s.tzOption);
+  prefs.putUChar("offat", s.offAtOption);
   prefs.end();
   log_i("Settings saved (vol=%u bri=%u rot=%u)", s.volumePct, s.brightnessPct,
         s.rotation);
