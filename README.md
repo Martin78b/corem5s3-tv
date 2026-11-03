@@ -12,11 +12,17 @@ Turn your ESP32-S3-based board into a standalone retro TV that plays episodes wi
 - **SD:** SPI mode (CS=4, MOSI=37, MISO=35, SCK=36)
 
 ### Waveshare ESP32-S3-Touch-LCD-1.54
-- **Display:** 1.54" IPS 240×240 ST7789V2 (SPI)
-- **Audio:** ES8311 DAC + NS4150B amp (3W mono)
+- **Display:** 1.54" IPS 240×240 ST7789V2 (SPI, direct streaming / DMA)
+- **Audio:** ES8311 DAC + NS4150B amp (3W mono, hardware volume register control)
 - **SD:** SD_MMC 4-bit mode (CLK=16, CMD=15, D0=17, D1=18, D2=13, D3=14)
-- **Touch:** CST816T capacitive (GPIO42/41 I2C)
+- **Touch:** CST816T capacitive (GPIO42/41 I2C, auto-rotated coordinates)
+- **Accelerometer / IMU:** QMI8658 6-axis (GPIO42/41 I2C, auto screen rotation)
+- **RTC:** PCF85063 real-time clock (GPIO42/41 I2C, NTP network sync)
+- **Battery & Power:** ETA6098 charge manager & battery ADC (GPIO1/3, calibrated LiPo discharge curve)
 - **Buttons:** BOOT/- (GPIO0), PWR (GPIO5), +/Key (GPIO4)
+
+### Generic ESP32-S3 + 1.54" SPI
+- Compatible with custom builds using `generic-esp32-s3-154` target.
 
 ## Quick Start
 
@@ -119,10 +125,10 @@ No SD card? The display shows "NO SD CARD". No `.mjpeg` files? It shows "NO .mjp
 
 ### Behavior
 
-- **Power on** → Boot animation → TV static → Episode starts
+- **Power on** → Boot animation with firmware version and repository URL → TV static → Episode starts
 - **Between episodes** → TV static for 1.5 seconds → next episode
-- **Channel OSD** → "CH XX" in top-right corner for 2 seconds per episode
-- **Episode order** → Random shuffle on each boot
+- **Channel OSD** → "CH XX [HH:MM]" in top-right corner for 2 seconds per episode
+- **Episode order** → Random shuffle on each boot (with anti-repeat protection across reshuffles)
 - **Loop** → Plays continuously until power-off
 - **Next / previous episode** → Brief TV static, then the new channel
   - M5Stack: tap the right / left half of the screen
@@ -132,20 +138,21 @@ No SD card? The display shows "NO SD CARD". No `.mjpeg` files? It shows "NO .mjp
 
 ### Settings Menu (Waveshare)
 
-Short press **PWR** while an episode plays to open the menu. Video and audio pause, and resume where they were when it closes.
+Short press **PWR** while an episode plays to open the menu. Video and audio pause, and resume where they were when it closes. The menu features a scrolling CRT-style list (up to 9 items visible at once with `^`/`v` indicators):
 
 | Item | Values |
 |------|--------|
 | VOLUMEN | 0–100 % (steps of 10) |
 | BRILLO | 10–100 % (steps of 10) |
+| ROTACION | Fixed 0° / 90° / 180° / 270°, or AUTO (uses QMI8658 accelerometer; saved in NVS) |
 | APAGADO | Sleep timer: NO / 15m / 30m / 60m / 2h / 4h / FIN EP (when the current episode ends). Counts from when it is set; not saved |
 | APAGAR A | Power off every day at a clock time: NO / 20:00 … 02:00. Saved; needs a valid clock (see below) |
 | INACTIVIDAD | Power off after this long without touches or button presses: NO / 1h / 2h / 4h (default 2h). Held while the battery is charging or in USB mode |
 | HORA | Current time. Select it to set the clock from the internet (NTP) over the saved WiFi network |
 | ZONA | Time zone as a fixed UTC offset, UTC-12 … UTC+14 (default UTC-3, no daylight saving). Saved |
-| WIFI | Sub-page: CONECTAR... (QR + captive portal), ESTADO, SUBIR EPISODIOS, OLVIDAR RED |
+| WIFI | Sub-page: CONECTAR... (QR + captive portal), ESTADO, SUBIR EPISODIOS, OLVIDAR RED, VOLVER |
 | MODO USB | Unmounts the SD card from the firmware and exposes it to a connected PC as a USB Mass Storage drive |
-| INFO | Firmware version, battery %, voltage, episode count, time, sleep time left, WiFi |
+| INFO | Firmware version, battery %, voltage, charge status, episode count, time, sleep time left, WiFi status/IP |
 | SALIR | Close the menu |
 
 | Action | Buttons | Touch |
@@ -155,9 +162,27 @@ Short press **PWR** while an episode plays to open the menu. Video and audio pau
 | Open MODO USB / INFO / SALIR | + | Tap |
 | Back / close | PWR short press | — |
 
-The menu closes by itself after 10 s without input. Volume, brightness and INACTIVIDAD are saved to flash (NVS) and restored at boot; volume and brightness are saved both when set in the menu and when changed with swipes (saved 5 s after the last change).
+The menu closes by itself after 10 s without input. Volume, brightness, rotation, inactivity timeout, daily off time, and timezone are saved to flash (NVS) and restored at boot; volume and brightness are also saved 5 s after gesture changes.
 
-While the sleep timer runs, the time left (e.g. `Z 25m`) shows beside the battery icon. One minute before an automatic power-off, a warning appears: any touch or button cancels it (the inactivity count restarts, the sleep timer is switched off) without changing channel.
+While the sleep timer runs, the time left (e.g. `Z 25m`) shows beside the battery icon. One minute before an automatic power-off (either sleep timer, inactivity, or scheduled clock time), a warning appears: any touch or button cancels it without changing channels.
+
+### Screen Rotation & Accelerometer (Waveshare)
+
+- **Manual or Automatic**: Choose fixed 0°, 90°, 180°, 270°, or `AUTO`.
+- **QMI8658 6-Axis IMU**: In `AUTO` mode, the accelerometer is sampled at 10 Hz from the touch background task.
+- **Orientation Filtering**: Ignores flat/resting orientations (|Z| dominant or < 0.45g), requires a dominant tilt angle (~35°), and enforces a 700 ms stability window before changing orientation.
+- **Dynamic Touch Mapping**: CST816T touch coordinates are automatically rotated to match the screen's visual rotation, ensuring vertical/horizontal volume and brightness gestures remain intuitive.
+
+### WiFi Setup & Captive Portal (Waveshare)
+
+Configure WiFi without needing a companion app:
+1. Open **Settings Menu → WIFI → CONECTAR...**. Playback pauses and WiFi powers on.
+2. The device starts an access point `CoreTV-XXXX` and displays **QR 1** (`WIFI:T:WPA;S:...;P:...`).
+3. Scan the QR code with your phone camera to join the AP automatically.
+4. Once connected, a captive portal automatically launches (or scan **QR 2** pointing to `http://192.168.4.1`).
+5. Choose your network from the scanned list (sorted by signal strength), enter your password, and save.
+6. The device tests the connection, stores credentials in NVS, syncs time via NTP, displays `CONECTADO ✓` with the IP, and resumes playback. If connection fails, precise diagnostic errors are displayed (e.g., Wrong password, Router rejected, Weak signal, DHCP timeout).
+7. WiFi radio powers completely off during video playback to conserve RAM and battery.
 
 ### Clock (Waveshare)
 
@@ -252,7 +277,10 @@ The most important parameters for playback quality vs. storage:
 ```
 CoreM5S3-TV/
 ├── FEASIBILITY.md                 # Hardware analysis and feasibility
+├── HANDOFF.md                     # Code review notes and roadmap tracking
+├── HARDWARE_REFERENCE.md          # Hardware pinouts and register docs
 ├── README.md                      # This file
+├── docs/reference/                # Reference BSP source files
 ├── firmware/                      # PlatformIO firmware project
 │   ├── platformio.ini             # Build configuration
 │   └── src/
@@ -262,12 +290,13 @@ CoreM5S3-TV/
 │       ├── audio_player.h/.cpp    # I2S audio playback
 │       ├── audio_hal.h            # Hardware abstraction layer
 │       ├── display_hal.h          # Display abstraction layer
-│       ├── crt_effects.h/.cpp     # TV static generator
+│       ├── crt_effects.h/.cpp     # TV static generator & noise pool
 │       ├── backlight.h/.cpp       # PWM backlight control
 │       ├── battery_monitor.h      # Battery voltage/percentage monitoring
 │       ├── gesture_control.h/.cpp # Touch gesture volume/brightness
 │       ├── menu.h/.cpp            # On-screen settings menu (Waveshare)
 │       ├── auto_off.h/.cpp        # Sleep timer and inactivity power-off (Waveshare)
+│       ├── rotation.h/.cpp        # Screen rotation & QMI8658 accelerometer (Waveshare)
 │       ├── usb_msc.h/.cpp         # USB Mass Storage mode for SD card (Waveshare)
 │       ├── wifi_setup.h/.cpp      # WiFi setup: SoftAP + QR + captive portal (Waveshare)
 │       ├── clock.h/.cpp           # RTC (PCF85063) + NTP clock (Waveshare)
@@ -282,10 +311,10 @@ CoreM5S3-TV/
     └── README.md                  # SD card preparation guide
 ```
 
-## Memory Map
+## Memory Map & Architecture
 
 ```
-PSRAM (8 MB total):
+PSRAM Mode (8 MB total):
 ├── JPEG decode buffer         64 KB
 ├── RGB565 framebuffer        154 KB
 ├── JPEGDEC work buffer        ~8 KB
@@ -296,13 +325,17 @@ PSRAM (8 MB total):
 ├── Remaining for stack/etc.  ~7.4 MB
 └── Audio data buffer           2 KB
 
-Internal SRAM (512 KB):
+Internal SRAM Mode (Direct Sink / Low RAM):
 ├── FreeRTOS kernel + tasks   ~200 KB
 ├── Arduino core               ~100 KB
-├── WiFi/LWIP stack            ~60 KB
-├── M5GFX + M5Unified         ~50 KB
-├── Remaining for stack       ~100 KB
+├── WiFi/LWIP stack (on-demand)~60 KB
+├── Direct block render buffer   ~2 KB (no 154 KB framebuffer needed)
+├── CRT static noise pool       19 KB
+└── Remaining for stack/heap   ~130 KB
 ```
+
+> [!NOTE]
+> On hardware configurations running without PSRAM, the firmware activates a direct sink mode (`VideoPlayer::setDirectSink`) that streams decoded JPEG blocks directly to the ST7789 display controller, removing the need for a full RGB565 framebuffer in internal SRAM. During WiFi setup and web upload, video decode buffers are dynamically freed to allocate RAM for the TCP/IP stack and web server, and reclaimed once WiFi shuts down.
 
 ## Performance
 
@@ -314,20 +347,25 @@ Internal SRAM (512 KB):
 ## Stretch Goals
 
 - [x] Random episode mode (✓ — default behavior)
-- [x] Channel up/down (touch or hardware buttons — needs wiring)
-- [x] 1990s TV UI with OSD menus (settings menu on Waveshare)
-- [x] Simpsons intro boot animation (✓ — basic animation present)
-- [x] Volume control (via touch gestures on Waveshare)
-- [x] Sleep timer and inactivity power-off (Waveshare)
-- [ ] Favorites list
-- [x] Shuffle mode (✓ — default)
+- [x] Channel up/down (hardware buttons or screen tap)
+- [x] 1990s TV UI with OSD menus (scrolling settings menu on Waveshare)
+- [x] Simpsons intro boot animation with firmware version and repo URL overlay
+- [x] Volume control (via touch gestures and settings menu)
+- [x] Brightness control (via touch gestures and settings menu)
+- [x] Previous episode navigation
+- [x] Shuffle mode (✓ — default, with anti-repeat protection)
+- [x] Battery monitoring with low-battery alerts and charge status
+- [x] Sleep timer, end-of-episode off, and inactivity power-off (Waveshare)
+- [x] Screen rotation (manual 0/90/180/270° and automatic via QMI8658 accelerometer)
+- [x] USB Mass Storage mode (transfer episodes via PC over USB)
+- [x] WiFi configuration via captive portal + QR code
+- [x] NTP clock synchronization (PCF85063 RTC) & scheduled daily off time
+- [x] Web browser upload and management of episodes over WiFi
+- [x] CRT power-off animation
 - [x] Support for Futurama + other shows
+- [ ] Favorites list
 - [ ] WiFi streaming from NAS/Jellyfin
 - [ ] OTA firmware updates
-- [x] Battery monitoring with low-battery alerts
-- [x] CRT power-off animation
-- [x] Brightness control (via touch gestures)
-- [x] Previous episode navigation
 
 ## Troubleshooting
 
